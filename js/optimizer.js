@@ -275,12 +275,16 @@ App.Optimizer = {
 
     const bestStrategy = db.length > 0 ? db.sort((a, b) => b.score - a.score)[0] : null;
 
+    // Most recent write to the learning memory, so the UI can show freshness/persistence clearly
+    const lastUpdated = db.length > 0 ? Math.max(...db.map(e => e.timestamp || 0)) : null;
+
     return {
       totalRuns,
       goodClusters,
       exclusionPercent,
       bestScore: bestStrategy ? bestStrategy.score : 0,
-      bestParams: bestStrategy ? bestStrategy.params : null
+      bestParams: bestStrategy ? bestStrategy.params : null,
+      lastUpdated
     };
   },
 

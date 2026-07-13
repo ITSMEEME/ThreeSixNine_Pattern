@@ -793,11 +793,23 @@ App.UI = {
     const exclEl = document.getElementById('wissen-exclusion');
     const bestEl = document.getElementById('wissen-best-score');
     const bestParamsEl = document.getElementById('wissen-best-params');
+    const persistEl = document.getElementById('wissen-persistence-status');
     
     if (runEl) runEl.textContent = stats.totalRuns;
     if (clusterEl) clusterEl.textContent = stats.goodClusters;
     if (exclEl) exclEl.textContent = stats.exclusionPercent + '%';
     if (bestEl) bestEl.textContent = stats.bestScore.toFixed(1);
+
+    // Make it explicit that this memory is durable (localStorage) and survives resets/reloads
+    if (persistEl) {
+      if (stats.totalRuns > 0) {
+        persistEl.innerHTML = `💾 Lernspeicher gespeichert &middot; ${stats.totalRuns} Einträge &middot; zuletzt aktualisiert ${App.formatRelativeTime(stats.lastUpdated)} &middot; bleibt nach Reload/Reset erhalten`;
+        persistEl.style.color = 'var(--teal)';
+      } else {
+        persistEl.innerHTML = `💾 Noch kein Lernspeicher vorhanden. Starte den Optimizer, um dauerhaft (über Sitzungen und Resets hinweg) zu lernen.`;
+        persistEl.style.color = 'var(--text-faint)';
+      }
+    }
     
     if (bestParamsEl) {
       if (stats.bestParams) {
@@ -832,7 +844,8 @@ App.UI = {
     const optStatusText = document.getElementById('opt-status-text');
     if (optStatusText && (!App.Optimizer || !App.Optimizer.state.isRunning)) {
       if (totalRuns > 0) {
-        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests)`;
+        const stats = App.Optimizer.getWissensstand();
+        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests, zuletzt ${App.formatRelativeTime(stats.lastUpdated)})`;
         optStatusText.style.color = 'var(--teal)';
       } else {
         optStatusText.textContent = 'Bereit (Keine Lern-Daten)';

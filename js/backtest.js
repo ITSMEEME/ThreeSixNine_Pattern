@@ -353,21 +353,44 @@ App.Backtest = {
         if (symbolEl) symbolEl.value = cached.symbol;
         if (daysEl) daysEl.value = cached.days;
         
-        // Update status text
+        // Update status text, including how fresh the cached data is so it's clear this
+        // came from a local (IndexedDB) cache and not a fresh download
         const loaderStatus = document.getElementById('backtest-loader-status');
         if (loaderStatus) {
-          loaderStatus.textContent = `${cached.candles.length.toLocaleString()} Kerzen (${cached.symbol.toUpperCase()}, ${cached.days} Tage) aus Cache geladen.`;
+          const age = App.formatRelativeTime(cached.timestamp);
+          loaderStatus.innerHTML = `💾 ${cached.candles.length.toLocaleString()} Kerzen (${cached.symbol.toUpperCase()}, ${cached.days} Tage) aus lokalem Cache geladen &middot; ${age}, kein erneuter Download nötig.`;
         }
         
         // Enable buttons
         const runBtn = document.getElementById('btn-run-backtest');
         const optBtn = document.getElementById('btn-start-optimizer');
+        const clearBtn = document.getElementById('btn-clear-candle-cache');
         if (runBtn) runBtn.disabled = false;
         if (optBtn) optBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
       }
     } catch (e) {
       console.error('Fehler beim Laden der zwischengespeicherten Kerzen:', e);
     }
+  },
+
+  async handleClearCandleCache() {
+    if (!confirm('Zwischengespeicherte Kerzendaten (IndexedDB) wirklich löschen? Beim nächsten Mal müssen sie erneut von Binance heruntergeladen werden.')) return;
+    try {
+      if (App.DB && App.DB.delete) await App.DB.delete('cached-candles');
+    } catch (e) {
+      console.error('Fehler beim Löschen des Kerzen-Cache:', e);
+    }
+    App.state.backtestCandles = [];
+    const loaderStatus = document.getElementById('backtest-loader-status');
+    if (loaderStatus) loaderStatus.textContent = 'Keine Kerzen geladen.';
+    const runBtn = document.getElementById('btn-run-backtest');
+    const optBtn = document.getElementById('btn-start-optimizer');
+    const clearBtn = document.getElementById('btn-clear-candle-cache');
+    if (runBtn) runBtn.disabled = true;
+    if (optBtn) optBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+    App.UI.showToast('Kerzen-Cache gelöscht.');
   },
 
   async handleLoadBacktestData() {
@@ -402,17 +425,22 @@ App.Backtest = {
       runBtn.disabled = false;
       if (optBtn) optBtn.disabled = false;
       
-      // Save candles to IndexedDB cache
+      // Save candles to IndexedDB cache so a page reload or new session reuses them
+      // instead of re-downloading from Binance
+      const cacheTimestamp = Date.now();
       if (App.DB && App.DB.set) {
         await App.DB.set('cached-candles', {
           symbol: symbol,
           days: days,
           candles: App.state.backtestCandles,
-          timestamp: Date.now()
+          timestamp: cacheTimestamp
         });
       }
+      const clearBtn = document.getElementById('btn-clear-candle-cache');
+      if (clearBtn) clearBtn.disabled = false;
+      loaderStatus.innerHTML = `${App.state.backtestCandles.length.toLocaleString()} Kerzen (${symbol.toUpperCase()}, 1m) heruntergeladen &middot; 💾 lokal zwischengespeichert.`;
       
-      App.UI.showToast('Kerzendaten erfolgreich geladen.');
+      App.UI.showToast('Kerzendaten erfolgreich geladen und lokal zwischengespeichert.');
     } catch (err) {
       console.error(err);
       loaderStatus.textContent = err.isRateLimit
@@ -734,6 +762,9 @@ App.Backtest = {
   wireBacktestEvents() {
     document.getElementById('btn-load-backtest-data').addEventListener('click', this.handleLoadBacktestData);
     document.getElementById('btn-run-backtest').addEventListener('click', () => this.handleRunSingleBacktest());
+
+    const clearCacheBtn = document.getElementById('btn-clear-candle-cache');
+    if (clearCacheBtn) clearCacheBtn.addEventListener('click', () => this.handleClearCandleCache());
     
     const startOptBtn = document.getElementById('btn-start-optimizer');
     if (startOptBtn) startOptBtn.addEventListener('click', () => this.handleStartOptimizer());

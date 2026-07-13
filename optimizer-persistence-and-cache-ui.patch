@@ -1,0 +1,198 @@
+diff --git a/js/backtest.js b/js/backtest.js
+index 5d474b1..2801e17 100644
+--- a/js/backtest.js
++++ b/js/backtest.js
+@@ -353,23 +353,46 @@ App.Backtest = {
+         if (symbolEl) symbolEl.value = cached.symbol;
+         if (daysEl) daysEl.value = cached.days;
+         
+-        // Update status text
++        // Update status text, including how fresh the cached data is so it's clear this
++        // came from a local (IndexedDB) cache and not a fresh download
+         const loaderStatus = document.getElementById('backtest-loader-status');
+         if (loaderStatus) {
+-          loaderStatus.textContent = `${cached.candles.length.toLocaleString()} Kerzen (${cached.symbol.toUpperCase()}, ${cached.days} Tage) aus Cache geladen.`;
++          const age = App.formatRelativeTime(cached.timestamp);
++          loaderStatus.innerHTML = `💾 ${cached.candles.length.toLocaleString()} Kerzen (${cached.symbol.toUpperCase()}, ${cached.days} Tage) aus lokalem Cache geladen &middot; ${age}, kein erneuter Download nötig.`;
+         }
+         
+         // Enable buttons
+         const runBtn = document.getElementById('btn-run-backtest');
+         const optBtn = document.getElementById('btn-start-optimizer');
++        const clearBtn = document.getElementById('btn-clear-candle-cache');
+         if (runBtn) runBtn.disabled = false;
+         if (optBtn) optBtn.disabled = false;
++        if (clearBtn) clearBtn.disabled = false;
+       }
+     } catch (e) {
+       console.error('Fehler beim Laden der zwischengespeicherten Kerzen:', e);
+     }
+   },
+ 
++  async handleClearCandleCache() {
++    if (!confirm('Zwischengespeicherte Kerzendaten (IndexedDB) wirklich löschen? Beim nächsten Mal müssen sie erneut von Binance heruntergeladen werden.')) return;
++    try {
++      if (App.DB && App.DB.delete) await App.DB.delete('cached-candles');
++    } catch (e) {
++      console.error('Fehler beim Löschen des Kerzen-Cache:', e);
++    }
++    App.state.backtestCandles = [];
++    const loaderStatus = document.getElementById('backtest-loader-status');
++    if (loaderStatus) loaderStatus.textContent = 'Keine Kerzen geladen.';
++    const runBtn = document.getElementById('btn-run-backtest');
++    const optBtn = document.getElementById('btn-start-optimizer');
++    const clearBtn = document.getElementById('btn-clear-candle-cache');
++    if (runBtn) runBtn.disabled = true;
++    if (optBtn) optBtn.disabled = true;
++    if (clearBtn) clearBtn.disabled = true;
++    App.UI.showToast('Kerzen-Cache gelöscht.');
++  },
++
+   async handleLoadBacktestData() {
+     const btn = document.getElementById('btn-load-backtest-data');
+     const symbol = document.getElementById('backtest-symbol').value.trim();
+@@ -402,17 +425,22 @@ App.Backtest = {
+       runBtn.disabled = false;
+       if (optBtn) optBtn.disabled = false;
+       
+-      // Save candles to IndexedDB cache
++      // Save candles to IndexedDB cache so a page reload or new session reuses them
++      // instead of re-downloading from Binance
++      const cacheTimestamp = Date.now();
+       if (App.DB && App.DB.set) {
+         await App.DB.set('cached-candles', {
+           symbol: symbol,
+           days: days,
+           candles: App.state.backtestCandles,
+-          timestamp: Date.now()
++          timestamp: cacheTimestamp
+         });
+       }
++      const clearBtn = document.getElementById('btn-clear-candle-cache');
++      if (clearBtn) clearBtn.disabled = false;
++      loaderStatus.innerHTML = `${App.state.backtestCandles.length.toLocaleString()} Kerzen (${symbol.toUpperCase()}, 1m) heruntergeladen &middot; 💾 lokal zwischengespeichert.`;
+       
+-      App.UI.showToast('Kerzendaten erfolgreich geladen.');
++      App.UI.showToast('Kerzendaten erfolgreich geladen und lokal zwischengespeichert.');
+     } catch (err) {
+       console.error(err);
+       loaderStatus.textContent = err.isRateLimit
+@@ -734,6 +762,9 @@ App.Backtest = {
+   wireBacktestEvents() {
+     document.getElementById('btn-load-backtest-data').addEventListener('click', this.handleLoadBacktestData);
+     document.getElementById('btn-run-backtest').addEventListener('click', () => this.handleRunSingleBacktest());
++
++    const clearCacheBtn = document.getElementById('btn-clear-candle-cache');
++    if (clearCacheBtn) clearCacheBtn.addEventListener('click', () => this.handleClearCandleCache());
+     
+     const startOptBtn = document.getElementById('btn-start-optimizer');
+     if (startOptBtn) startOptBtn.addEventListener('click', () => this.handleStartOptimizer());
+diff --git a/js/optimizer.js b/js/optimizer.js
+index b8db4b4..e81839e 100644
+--- a/js/optimizer.js
++++ b/js/optimizer.js
+@@ -275,12 +275,16 @@ App.Optimizer = {
+ 
+     const bestStrategy = db.length > 0 ? db.sort((a, b) => b.score - a.score)[0] : null;
+ 
++    // Most recent write to the learning memory, so the UI can show freshness/persistence clearly
++    const lastUpdated = db.length > 0 ? Math.max(...db.map(e => e.timestamp || 0)) : null;
++
+     return {
+       totalRuns,
+       goodClusters,
+       exclusionPercent,
+       bestScore: bestStrategy ? bestStrategy.score : 0,
+-      bestParams: bestStrategy ? bestStrategy.params : null
++      bestParams: bestStrategy ? bestStrategy.params : null,
++      lastUpdated
+     };
+   },
+ 
+diff --git a/js/state.js b/js/state.js
+index 19ac7f1..f81c819 100644
+--- a/js/state.js
++++ b/js/state.js
+@@ -42,6 +42,20 @@ App.initState = () => {
+ 
+ App.nextId = () => (App.idCounter++).toString(36);
+ 
++// Human-readable relative time, e.g. "gerade eben", "vor 5 Min.", "vor 3 Std."
++App.formatRelativeTime = (ts) => {
++  if (!ts) return 'unbekannt';
++  const diffMs = Date.now() - ts;
++  if (diffMs < 0) return 'gerade eben';
++  const min = Math.floor(diffMs / 60000);
++  if (min < 1) return 'gerade eben';
++  if (min < 60) return `vor ${min} Min.`;
++  const hrs = Math.floor(min / 60);
++  if (hrs < 24) return `vor ${hrs} Std.`;
++  const days = Math.floor(hrs / 24);
++  return `vor ${days} Tag${days === 1 ? '' : 'en'}`;
++};
++
+ // Lightweight IndexedDB helper for storing large datasets like candles
+ App.DB = {
+   dbName: 'paper-perp-db',
+diff --git a/js/ui.js b/js/ui.js
+index 4c56dbd..f85d243 100644
+--- a/js/ui.js
++++ b/js/ui.js
+@@ -793,11 +793,23 @@ App.UI = {
+     const exclEl = document.getElementById('wissen-exclusion');
+     const bestEl = document.getElementById('wissen-best-score');
+     const bestParamsEl = document.getElementById('wissen-best-params');
++    const persistEl = document.getElementById('wissen-persistence-status');
+     
+     if (runEl) runEl.textContent = stats.totalRuns;
+     if (clusterEl) clusterEl.textContent = stats.goodClusters;
+     if (exclEl) exclEl.textContent = stats.exclusionPercent + '%';
+     if (bestEl) bestEl.textContent = stats.bestScore.toFixed(1);
++
++    // Make it explicit that this memory is durable (localStorage) and survives resets/reloads
++    if (persistEl) {
++      if (stats.totalRuns > 0) {
++        persistEl.innerHTML = `💾 Lernspeicher gespeichert &middot; ${stats.totalRuns} Einträge &middot; zuletzt aktualisiert ${App.formatRelativeTime(stats.lastUpdated)} &middot; bleibt nach Reload/Reset erhalten`;
++        persistEl.style.color = 'var(--teal)';
++      } else {
++        persistEl.innerHTML = `💾 Noch kein Lernspeicher vorhanden. Starte den Optimizer, um dauerhaft (über Sitzungen und Resets hinweg) zu lernen.`;
++        persistEl.style.color = 'var(--text-faint)';
++      }
++    }
+     
+     if (bestParamsEl) {
+       if (stats.bestParams) {
+@@ -832,7 +844,8 @@ App.UI = {
+     const optStatusText = document.getElementById('opt-status-text');
+     if (optStatusText && (!App.Optimizer || !App.Optimizer.state.isRunning)) {
+       if (totalRuns > 0) {
+-        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests)`;
++        const stats = App.Optimizer.getWissensstand();
++        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests, zuletzt ${App.formatRelativeTime(stats.lastUpdated)})`;
+         optStatusText.style.color = 'var(--teal)';
+       } else {
+         optStatusText.textContent = 'Bereit (Keine Lern-Daten)';
+diff --git a/paper-perp.html b/paper-perp.html
+index 484b0d8..d8475b0 100644
+--- a/paper-perp.html
++++ b/paper-perp.html
+@@ -333,7 +333,10 @@
+                     </div>
+                   </div>
+                 </div>
+-                <button type="button" id="btn-load-backtest-data" class="backtest-btn">Daten laden</button>
++                <div style="display: flex; gap: 6px;">
++                  <button type="button" id="btn-load-backtest-data" class="backtest-btn" style="flex: 1;">Daten laden</button>
++                  <button type="button" id="btn-clear-candle-cache" class="backtest-btn" title="Zwischengespeicherte Kerzen aus dem Browser (IndexedDB) löschen" style="flex: 0 0 auto; padding: 6px 10px; border: 1px dashed var(--border); background: transparent; color: var(--text-dim);" disabled>Cache leeren</button>
++                </div>
+                 <div id="backtest-loader-status" style="font-size: 10px; color: var(--text-dim); margin-top: 6px; font-weight: 500;">Keine Kerzen geladen.</div>
+                 <!-- Progress bar -->
+                 <div id="backtest-progress-container" style="display: none; margin-top: 8px; background: var(--surface-3); border-radius: 4px; overflow: hidden; height: 6px; border: 1px solid var(--border-soft);">
+@@ -556,6 +559,7 @@
+ 
+                 <!-- Sub-tab content: Wissensstand (Lernspeicher) -->
+                 <div class="res-tab-content" id="res-tab-wissensstand" style="display: none;">
++                  <div id="wissen-persistence-status" style="font-size: 10px; font-weight: 600; padding: 6px 8px; background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 4px; margin-top: 4px;">💾 Lernspeicher wird geladen...</div>
+                   <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
+                     <div style="background: var(--surface-2); border: 1px solid var(--border-soft); padding: 12px; border-radius: 6px; text-align: center;">
+                       <div style="font-size: 9px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px;">Datenbank-Einträge</div>

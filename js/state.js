@@ -42,6 +42,20 @@ App.initState = () => {
 
 App.nextId = () => (App.idCounter++).toString(36);
 
+// Human-readable relative time, e.g. "gerade eben", "vor 5 Min.", "vor 3 Std."
+App.formatRelativeTime = (ts) => {
+  if (!ts) return 'unbekannt';
+  const diffMs = Date.now() - ts;
+  if (diffMs < 0) return 'gerade eben';
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return 'gerade eben';
+  if (min < 60) return `vor ${min} Min.`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `vor ${hrs} Std.`;
+  const days = Math.floor(hrs / 24);
+  return `vor ${days} Tag${days === 1 ? '' : 'en'}`;
+};
+
 // Lightweight IndexedDB helper for storing large datasets like candles
 App.DB = {
   dbName: 'paper-perp-db',
