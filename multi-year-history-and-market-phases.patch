@@ -1,0 +1,685 @@
+diff --git a/js/backtest.js b/js/backtest.js
+index 5d474b1..d4ff459 100644
+--- a/js/backtest.js
++++ b/js/backtest.js
+@@ -1,9 +1,9 @@
+ window.App = window.App || {};
+ 
+ App.Backtest = {
+-  async fetchBinance1mCandles(symbol, totalCount, onProgress) {
++  async fetchBinance1mCandles(symbol, totalCount, onProgress, anchorEndTimeMs) {
+     let allCandles = [];
+-    let endTime = Date.now();
++    let endTime = anchorEndTimeMs || Date.now();
+     const limit = 1000;
+     
+     while (allCandles.length < totalCount) {
+@@ -340,36 +340,247 @@ App.Backtest = {
+     };
+   },
+ 
++  // ---- Helpers for the multi-slot candle dataset library (IndexedDB) ----
++
++  formatDateShort(unixSec) {
++    return new Date(unixSec * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
++  },
++
++  buildDatasetKey(symbol, days, endMode, endDateStr) {
++    const endPart = endMode === 'custom' && endDateStr ? endDateStr : 'live';
++    return `candles::${symbol.toUpperCase()}::${days}d::${endPart}`;
++  },
++
++  async getCacheIndex() {
++    if (!App.DB || !App.DB.get) return [];
++    try {
++      const idx = await App.DB.get('cache-index');
++      return Array.isArray(idx) ? idx : [];
++    } catch (e) {
++      return [];
++    }
++  },
++
++  async saveCacheIndex(index) {
++    if (!App.DB || !App.DB.set) return;
++    await App.DB.set('cache-index', index);
++  },
++
++  async upsertCacheIndexEntry(entry) {
++    let index = await this.getCacheIndex();
++    index = index.filter(e => e.key !== entry.key);
++    index.push(entry);
++    index.sort((a, b) => b.timestamp - a.timestamp);
++
++    // Soft cap: keep at most 15 saved datasets so IndexedDB doesn't grow unbounded
++    // when building up a library of market phases
++    const MAX_DATASETS = 15;
++    if (index.length > MAX_DATASETS) {
++      const overflow = index.slice(MAX_DATASETS);
++      index = index.slice(0, MAX_DATASETS);
++      for (const old of overflow) {
++        try { await App.DB.delete(old.key); } catch (e) { /* ignore */ }
++      }
++    }
++    await this.saveCacheIndex(index);
++    return index;
++  },
++
++  async removeCacheIndexEntry(key) {
++    let index = await this.getCacheIndex();
++    index = index.filter(e => e.key !== key);
++    await this.saveCacheIndex(index);
++    try { await App.DB.delete(key); } catch (e) { /* ignore */ }
++    return index;
++  },
++
++  async setActiveDatasetKey(key) {
++    if (!App.DB || !App.DB.set) return;
++    await App.DB.set('active-candles-key', key);
++  },
++
++  // Live estimate of candle count / requests / rough load time, shown before the user commits to a download
++  updateBacktestEstimate() {
++    const days = parseInt(document.getElementById('backtest-days').value) || 0;
++    const totalCount = days * 1440;
++    const requests = Math.ceil(totalCount / 1000);
++    const seconds = Math.max(1, Math.round(requests * 0.35));
++    const timeLabel = seconds < 60 ? `~${seconds}s` : `~${Math.round(seconds / 60)} Min.`;
++
++    const endMode = document.querySelector('input[name="backtest-end-mode"]:checked')?.value || 'live';
++    const endDateEl = document.getElementById('backtest-end-date');
++    let endMs = Date.now();
++    if (endMode === 'custom' && endDateEl.value) {
++      endMs = new Date(endDateEl.value + 'T23:59:59Z').getTime();
++    }
++    const startMs = endMs - totalCount * 60000;
++    const rangeLabel = `${this.formatDateShort(Math.floor(startMs / 1000))} – ${this.formatDateShort(Math.floor(endMs / 1000))}`;
++
++    const estEl = document.getElementById('backtest-estimate');
++    if (!estEl) return;
++    let warning = '';
++    if (totalCount > 50000) warning = ' ⚠ große Datenmenge — Ladevorgang kann mehrere Minuten dauern und viel Speicher benötigen.';
++    estEl.innerHTML = `≈ ${totalCount.toLocaleString()} Kerzen (1m) &middot; Zeitraum: ${rangeLabel} &middot; ${requests} Anfragen, geschätzt ${timeLabel}${warning}`;
++  },
++
++  async renderCacheList() {
++    const container = document.getElementById('backtest-cache-list');
++    if (!container) return;
++    const index = await this.getCacheIndex();
++    let activeKey = null;
++    try { activeKey = await App.DB.get('active-candles-key'); } catch (e) { /* ignore */ }
++
++    if (index.length === 0) {
++      container.innerHTML = `<div style="font-size: 10px; color: var(--text-faint); font-style: italic;">Noch keine gespeicherten Datensätze. Geladene Kerzen bleiben hier für spätere Sitzungen erhalten.</div>`;
++      return;
++    }
++
++    container.innerHTML = index.map(e => {
++      const isActive = e.key === activeKey;
++      const rangeLabel = `${this.formatDateShort(e.fromTime)} – ${this.formatDateShort(e.toTime)}`;
++      return `
++        <div class="clickable" data-key="${e.key}" style="display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:10px; padding:6px 8px; border-radius:4px; background: var(--surface-2); border:1px solid ${isActive ? 'var(--teal)' : 'var(--border-soft)'};">
++          <div style="overflow:hidden;">
++            <div style="font-weight:600; color:${isActive ? 'var(--teal)' : 'var(--text-dim)'};">${isActive ? '✓ ' : ''}${e.symbol} &middot; ${e.days}T &middot; ${rangeLabel}</div>
++            <div style="color:var(--text-faint); margin-top:2px;">${e.count.toLocaleString()} Kerzen &middot; gespeichert ${App.formatRelativeTime(e.timestamp)}</div>
++          </div>
++          <div style="display:flex; gap:4px; flex:0 0 auto;">
++            ${isActive ? '' : `<button type="button" class="backtest-btn ds-load-btn" data-key="${e.key}" style="padding:4px 8px; font-size:9px;">Laden</button>`}
++            <button type="button" class="backtest-btn ds-del-btn" data-key="${e.key}" style="padding:4px 8px; font-size:9px; border:1px dashed var(--border); background:transparent; color:var(--text-dim);">Löschen</button>
++          </div>
++        </div>
++      `;
++    }).join('');
++
++    container.querySelectorAll('.ds-load-btn').forEach(btn => {
++      btn.addEventListener('click', () => this.handleLoadCachedDataset(btn.dataset.key));
++    });
++    container.querySelectorAll('.ds-del-btn').forEach(btn => {
++      btn.addEventListener('click', () => this.handleDeleteCachedDataset(btn.dataset.key));
++    });
++  },
++
++  applyLoadedDataset(entry, candles) {
++    App.state.backtestCandles = candles;
++
++    const symbolEl = document.getElementById('backtest-symbol');
++    const daysEl = document.getElementById('backtest-days');
++    const liveRadio = document.getElementById('backtest-end-mode-live');
++    const customRadio = document.getElementById('backtest-end-mode-custom');
++    const endDateWrap = document.getElementById('backtest-end-date-wrap');
++    const endDateEl = document.getElementById('backtest-end-date');
++
++    if (symbolEl) symbolEl.value = entry.symbol;
++    if (daysEl) daysEl.value = entry.days;
++    if (entry.endMode === 'custom' && entry.endDateStr) {
++      if (customRadio) customRadio.checked = true;
++      if (endDateWrap) endDateWrap.style.display = 'block';
++      if (endDateEl) endDateEl.value = entry.endDateStr;
++    } else {
++      if (liveRadio) liveRadio.checked = true;
++      if (endDateWrap) endDateWrap.style.display = 'none';
++    }
++
++    const loaderStatus = document.getElementById('backtest-loader-status');
++    const rangeLabel = `${this.formatDateShort(entry.fromTime)} – ${this.formatDateShort(entry.toTime)}`;
++    if (loaderStatus) {
++      loaderStatus.innerHTML = `💾 ${candles.length.toLocaleString()} Kerzen (${entry.symbol}, ${rangeLabel}) aus lokalem Cache geladen &middot; ${App.formatRelativeTime(entry.timestamp)}, kein erneuter Download nötig.`;
++    }
++
++    const runBtn = document.getElementById('btn-run-backtest');
++    const optBtn = document.getElementById('btn-start-optimizer');
++    const clearBtn = document.getElementById('btn-clear-candle-cache');
++    if (runBtn) runBtn.disabled = false;
++    if (optBtn) optBtn.disabled = false;
++    if (clearBtn) clearBtn.disabled = false;
++
++    this.updateBacktestEstimate();
++  },
++
++  async handleLoadCachedDataset(key) {
++    if (!App.DB || !App.DB.get) return;
++    try {
++      const data = await App.DB.get(key);
++      if (!data || !data.candles) {
++        App.UI.showToast('Datensatz konnte nicht geladen werden.');
++        return;
++      }
++      await this.setActiveDatasetKey(key);
++      this.applyLoadedDataset(data, data.candles);
++      await this.renderCacheList();
++      App.UI.showToast('Datensatz geladen.');
++    } catch (e) {
++      console.error('Fehler beim Laden des Datensatzes:', e);
++      App.UI.showToast('Fehler beim Laden des Datensatzes.');
++    }
++  },
++
++  async handleDeleteCachedDataset(key) {
++    if (!confirm('Diesen gespeicherten Datensatz wirklich löschen? Er muss danach ggf. erneut von Binance heruntergeladen werden.')) return;
++    let activeKey = null;
++    try { activeKey = await App.DB.get('active-candles-key'); } catch (e) { /* ignore */ }
++    await this.removeCacheIndexEntry(key);
++
++    if (key === activeKey) {
++      App.state.backtestCandles = [];
++      try { await App.DB.delete('active-candles-key'); } catch (e) { /* ignore */ }
++      const loaderStatus = document.getElementById('backtest-loader-status');
++      if (loaderStatus) loaderStatus.textContent = 'Keine Kerzen geladen.';
++      const runBtn = document.getElementById('btn-run-backtest');
++      const optBtn = document.getElementById('btn-start-optimizer');
++      const clearBtn = document.getElementById('btn-clear-candle-cache');
++      if (runBtn) runBtn.disabled = true;
++      if (optBtn) optBtn.disabled = true;
++      if (clearBtn) clearBtn.disabled = true;
++    }
++    await this.renderCacheList();
++    App.UI.showToast('Datensatz gelöscht.');
++  },
++
+   async loadCachedCandles() {
+     if (!App.DB || !App.DB.get) return;
+     try {
+-      const cached = await App.DB.get('cached-candles');
+-      if (cached && cached.candles && cached.candles.length > 0) {
+-        App.state.backtestCandles = cached.candles;
+-        
+-        // Restore input field values
+-        const symbolEl = document.getElementById('backtest-symbol');
+-        const daysEl = document.getElementById('backtest-days');
+-        if (symbolEl) symbolEl.value = cached.symbol;
+-        if (daysEl) daysEl.value = cached.days;
+-        
+-        // Update status text
+-        const loaderStatus = document.getElementById('backtest-loader-status');
+-        if (loaderStatus) {
+-          loaderStatus.textContent = `${cached.candles.length.toLocaleString()} Kerzen (${cached.symbol.toUpperCase()}, ${cached.days} Tage) aus Cache geladen.`;
+-        }
+-        
+-        // Enable buttons
+-        const runBtn = document.getElementById('btn-run-backtest');
+-        const optBtn = document.getElementById('btn-start-optimizer');
+-        if (runBtn) runBtn.disabled = false;
+-        if (optBtn) optBtn.disabled = false;
++      await this.renderCacheList();
++      const index = await this.getCacheIndex();
++      if (index.length === 0) return;
++
++      let activeKey = await App.DB.get('active-candles-key');
++      let entry = activeKey ? index.find(e => e.key === activeKey) : null;
++      // Fall back to the most recently saved dataset if there's no explicit active pointer
++      if (!entry) entry = index[0];
++
++      const data = await App.DB.get(entry.key);
++      if (data && data.candles && data.candles.length > 0) {
++        await this.setActiveDatasetKey(entry.key);
++        this.applyLoadedDataset(entry, data.candles);
++        await this.renderCacheList();
+       }
+     } catch (e) {
+       console.error('Fehler beim Laden der zwischengespeicherten Kerzen:', e);
+     }
+   },
+ 
++  async handleClearCandleCache() {
++    if (!confirm('Den aktuell geladenen Datensatz aus dem Cache entfernen? Er muss danach ggf. erneut von Binance heruntergeladen werden.')) return;
++    let activeKey = null;
++    try { activeKey = await App.DB.get('active-candles-key'); } catch (e) { /* ignore */ }
++    if (activeKey) {
++      await this.removeCacheIndexEntry(activeKey);
++      try { await App.DB.delete('active-candles-key'); } catch (e) { /* ignore */ }
++    }
++    App.state.backtestCandles = [];
++    const loaderStatus = document.getElementById('backtest-loader-status');
++    if (loaderStatus) loaderStatus.textContent = 'Keine Kerzen geladen.';
++    const runBtn = document.getElementById('btn-run-backtest');
++    const optBtn = document.getElementById('btn-start-optimizer');
++    const clearBtn = document.getElementById('btn-clear-candle-cache');
++    if (runBtn) runBtn.disabled = true;
++    if (optBtn) optBtn.disabled = true;
++    if (clearBtn) clearBtn.disabled = true;
++    await this.renderCacheList();
++    App.UI.showToast('Aktiver Kerzen-Cache gelöscht.');
++  },
++
+   async handleLoadBacktestData() {
+     const btn = document.getElementById('btn-load-backtest-data');
+     const symbol = document.getElementById('backtest-symbol').value.trim();
+@@ -379,40 +590,84 @@ App.Backtest = {
+     const progressBar = document.getElementById('backtest-progress-bar');
+     const runBtn = document.getElementById('btn-run-backtest');
+     const optBtn = document.getElementById('btn-start-optimizer');
+-    
++
++    const endMode = document.querySelector('input[name="backtest-end-mode"]:checked')?.value || 'live';
++    const endDateEl = document.getElementById('backtest-end-date');
++    const endDateStr = endDateEl ? endDateEl.value : '';
++
+     if (!symbol) {
+       App.UI.showToast('Bitte ein Symbol eingeben.');
+       return;
+     }
+-    
++    if (endMode === 'custom' && !endDateStr) {
++      App.UI.showToast('Bitte ein Enddatum wählen oder auf "Live" zurückschalten.');
++      return;
++    }
++
++    const totalCount = days * 1440;
++
++    // Large historical ranges (always 1m candles, by design) mean many API calls and a lot of
++    // memory — warn explicitly instead of silently downsampling or blocking the request.
++    if (totalCount > 50000) {
++      const requests = Math.ceil(totalCount / 1000);
++      const proceed = confirm(`Dieser Zeitraum ergibt ca. ${totalCount.toLocaleString()} 1m-Kerzen (~${requests} Anfragen an Binance) und kann mehrere Minuten dauern sowie viel Speicher benötigen. Fortfahren?`);
++      if (!proceed) return;
++    }
++
++    const anchorEndTimeMs = endMode === 'custom' ? new Date(endDateStr + 'T23:59:59Z').getTime() : undefined;
++
+     btn.disabled = true;
+     progressContainer.style.display = 'block';
+     progressBar.style.width = '0%';
+     loaderStatus.textContent = 'Verbinde mit Binance und lade Kerzen...';
+-    
+-    const totalCount = days * 1440;
+-    
++
+     try {
+       App.state.backtestCandles = await App.Backtest.fetchBinance1mCandles(symbol, totalCount, (percent) => {
+         progressBar.style.width = percent + '%';
+         loaderStatus.textContent = `Lade Kerzen: ${percent}% geladen...`;
+-      });
+-      
+-      loaderStatus.textContent = `${App.state.backtestCandles.length.toLocaleString()} Kerzen (1m) geladen.`;
++      }, anchorEndTimeMs);
++
++      const candles = App.state.backtestCandles;
+       runBtn.disabled = false;
+       if (optBtn) optBtn.disabled = false;
+-      
+-      // Save candles to IndexedDB cache
++
++      if (candles.length === 0) {
++        loaderStatus.textContent = 'Keine Kerzendaten für diesen Zeitraum gefunden.';
++        return;
++      }
++
++      const fromTime = candles[0].time;
++      const toTime = candles[candles.length - 1].time;
++      const key = this.buildDatasetKey(symbol, days, endMode, endDateStr);
++      const cacheTimestamp = Date.now();
++
++      const entry = {
++        key,
++        symbol: symbol.toUpperCase(),
++        days,
++        endMode,
++        endDateStr: endMode === 'custom' ? endDateStr : null,
++        fromTime,
++        toTime,
++        count: candles.length,
++        timestamp: cacheTimestamp
++      };
++
++      // Save candles + metadata to IndexedDB so this exact historical window (a "market phase")
++      // is cached locally and reusable across sessions without re-downloading
+       if (App.DB && App.DB.set) {
+-        await App.DB.set('cached-candles', {
+-          symbol: symbol,
+-          days: days,
+-          candles: App.state.backtestCandles,
+-          timestamp: Date.now()
+-        });
++        await App.DB.set(key, { ...entry, candles });
++        await this.upsertCacheIndexEntry(entry);
++        await this.setActiveDatasetKey(key);
+       }
+-      
+-      App.UI.showToast('Kerzendaten erfolgreich geladen.');
++
++      const clearBtn = document.getElementById('btn-clear-candle-cache');
++      if (clearBtn) clearBtn.disabled = false;
++      const rangeLabel = `${this.formatDateShort(fromTime)} – ${this.formatDateShort(toTime)}`;
++      loaderStatus.innerHTML = `${candles.length.toLocaleString()} Kerzen (${symbol.toUpperCase()}, ${rangeLabel}) heruntergeladen &middot; 💾 lokal zwischengespeichert.`;
++
++      await this.renderCacheList();
++      App.UI.showToast('Kerzendaten erfolgreich geladen und lokal zwischengespeichert.');
+     } catch (err) {
+       console.error(err);
+       loaderStatus.textContent = err.isRateLimit
+@@ -536,6 +791,12 @@ App.Backtest = {
+     const maxOpen = parseInt(document.getElementById('backtest-max-open').value);
+ 
+     const marketClass = App.Optimizer.classifyMarket(App.state.backtestCandles);
++    const candles = App.state.backtestCandles;
++    const datasetRange = candles && candles.length > 0 ? {
++      fromTime: candles[0].time,
++      toTime: candles[candles.length - 1].time,
++      label: `${this.formatDateShort(candles[0].time)} – ${this.formatDateShort(candles[candles.length - 1].time)}`
++    } : null;
+ 
+     const phaseTargets = {
+       1: 30,
+@@ -650,7 +911,7 @@ App.Backtest = {
+ 
+       while (attempts < 100) {
+         const candidate = App.Optimizer.generateCandidate(bounds);
+-        cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate);
++        cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate, datasetRange);
+         if (!cachedRes) {
+           combo = candidate;
+           break;
+@@ -662,7 +923,7 @@ App.Backtest = {
+         attempts = 0;
+         while (attempts < 100) {
+           const candidate = App.Optimizer.generateCandidate(App.Optimizer.state.bounds);
+-          cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate);
++          cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate, datasetRange);
+           if (!cachedRes) {
+             combo = candidate;
+             break;
+@@ -698,7 +959,8 @@ App.Backtest = {
+         App.state.rules,
+         combo,
+         backtestRes,
+-        marketClass
++        marketClass,
++        datasetRange
+       );
+ 
+       App.Optimizer.state.testsCompletedInPhase++;
+@@ -732,8 +994,34 @@ App.Backtest = {
+   },
+ 
+   wireBacktestEvents() {
+-    document.getElementById('btn-load-backtest-data').addEventListener('click', this.handleLoadBacktestData);
++    document.getElementById('btn-load-backtest-data').addEventListener('click', () => this.handleLoadBacktestData());
+     document.getElementById('btn-run-backtest').addEventListener('click', () => this.handleRunSingleBacktest());
++
++    const clearCacheBtn = document.getElementById('btn-clear-candle-cache');
++    if (clearCacheBtn) clearCacheBtn.addEventListener('click', () => this.handleClearCandleCache());
++
++    // Free date-anchor controls: toggle the custom end-date field and keep the live estimate in sync
++    const endModeLive = document.getElementById('backtest-end-mode-live');
++    const endModeCustom = document.getElementById('backtest-end-mode-custom');
++    const endDateWrap = document.getElementById('backtest-end-date-wrap');
++    const endDateEl = document.getElementById('backtest-end-date');
++    const daysEl = document.getElementById('backtest-days');
++
++    if (endDateEl && !endDateEl.value) {
++      endDateEl.value = new Date().toISOString().slice(0, 10);
++      endDateEl.max = new Date().toISOString().slice(0, 10);
++    }
++
++    const toggleEndMode = () => {
++      const mode = document.querySelector('input[name="backtest-end-mode"]:checked')?.value || 'live';
++      if (endDateWrap) endDateWrap.style.display = mode === 'custom' ? 'block' : 'none';
++      this.updateBacktestEstimate();
++    };
++    if (endModeLive) endModeLive.addEventListener('change', toggleEndMode);
++    if (endModeCustom) endModeCustom.addEventListener('change', toggleEndMode);
++    if (endDateEl) endDateEl.addEventListener('change', () => this.updateBacktestEstimate());
++    if (daysEl) daysEl.addEventListener('change', () => this.updateBacktestEstimate());
++    this.updateBacktestEstimate();
+     
+     const startOptBtn = document.getElementById('btn-start-optimizer');
+     if (startOptBtn) startOptBtn.addEventListener('click', () => this.handleStartOptimizer());
+diff --git a/js/optimizer.js b/js/optimizer.js
+index b8db4b4..ccebe8a 100644
+--- a/js/optimizer.js
++++ b/js/optimizer.js
+@@ -46,19 +46,22 @@ App.Optimizer = {
+     return Math.round(score * 10) / 10;
+   },
+ 
+-  getUniqueKey(symbol, rules, params) {
+-    // Unique key to prevent double testing
++  getUniqueKey(symbol, rules, params, datasetRange) {
++    // Unique key to prevent double testing. Includes the dataset's time range so the same
++    // parameter combo tested against different historical windows (market phases) is stored
++    // as distinct results instead of overwriting each other.
+     const rulesStr = JSON.stringify(rules.long) + JSON.stringify(rules.short);
+-    return `${symbol.toUpperCase()}_${rulesStr}_${params.leverage}_${params.cooldownMin}_${params.tpPercent}_${params.slPercent}_${params.maxOpen}`;
++    const phasePart = datasetRange ? `_${datasetRange.fromTime}-${datasetRange.toTime}` : '';
++    return `${symbol.toUpperCase()}_${rulesStr}_${params.leverage}_${params.cooldownMin}_${params.tpPercent}_${params.slPercent}_${params.maxOpen}${phasePart}`;
+   },
+ 
+-  checkCache(symbol, rules, params) {
+-    const key = this.getUniqueKey(symbol, rules, params);
++  checkCache(symbol, rules, params, datasetRange) {
++    const key = this.getUniqueKey(symbol, rules, params, datasetRange);
+     return App.state.optimizerDb[key] || null;
+   },
+ 
+-  saveToDb(symbol, timeframe, rules, params, res, marketClass) {
+-    const key = this.getUniqueKey(symbol, rules, params);
++  saveToDb(symbol, timeframe, rules, params, res, marketClass, datasetRange) {
++    const key = this.getUniqueKey(symbol, rules, params, datasetRange);
+     
+     // Check if DB is getting too large (compaction if size > 400 entries)
+     const entries = Object.keys(App.state.optimizerDb);
+@@ -78,6 +81,10 @@ App.Optimizer = {
+       timestamp: Date.now(),
+       market: symbol.toUpperCase(),
+       timeframe: timeframe,
++      // Which historical window (market phase) this test ran against, so the leaderboard
++      // and future multi-phase training can distinguish "works in 2022 bear market" from
++      // "works in the last 7 days"
++      datasetRange: datasetRange || null,
+       params: {
+         leverage: params.leverage,
+         cooldownMin: params.cooldownMin,
+@@ -275,12 +282,16 @@ App.Optimizer = {
+ 
+     const bestStrategy = db.length > 0 ? db.sort((a, b) => b.score - a.score)[0] : null;
+ 
++    // Most recent write to the learning memory, so the UI can show freshness/persistence clearly
++    const lastUpdated = db.length > 0 ? Math.max(...db.map(e => e.timestamp || 0)) : null;
++
+     return {
+       totalRuns,
+       goodClusters,
+       exclusionPercent,
+       bestScore: bestStrategy ? bestStrategy.score : 0,
+-      bestParams: bestStrategy ? bestStrategy.params : null
++      bestParams: bestStrategy ? bestStrategy.params : null,
++      lastUpdated
+     };
+   },
+ 
+diff --git a/js/state.js b/js/state.js
+index 19ac7f1..f81c819 100644
+--- a/js/state.js
++++ b/js/state.js
+@@ -42,6 +42,20 @@ App.initState = () => {
+ 
+ App.nextId = () => (App.idCounter++).toString(36);
+ 
++// Human-readable relative time, e.g. "gerade eben", "vor 5 Min.", "vor 3 Std."
++App.formatRelativeTime = (ts) => {
++  if (!ts) return 'unbekannt';
++  const diffMs = Date.now() - ts;
++  if (diffMs < 0) return 'gerade eben';
++  const min = Math.floor(diffMs / 60000);
++  if (min < 1) return 'gerade eben';
++  if (min < 60) return `vor ${min} Min.`;
++  const hrs = Math.floor(min / 60);
++  if (hrs < 24) return `vor ${hrs} Std.`;
++  const days = Math.floor(hrs / 24);
++  return `vor ${days} Tag${days === 1 ? '' : 'en'}`;
++};
++
+ // Lightweight IndexedDB helper for storing large datasets like candles
+ App.DB = {
+   dbName: 'paper-perp-db',
+diff --git a/js/ui.js b/js/ui.js
+index 4c56dbd..f85d243 100644
+--- a/js/ui.js
++++ b/js/ui.js
+@@ -793,11 +793,23 @@ App.UI = {
+     const exclEl = document.getElementById('wissen-exclusion');
+     const bestEl = document.getElementById('wissen-best-score');
+     const bestParamsEl = document.getElementById('wissen-best-params');
++    const persistEl = document.getElementById('wissen-persistence-status');
+     
+     if (runEl) runEl.textContent = stats.totalRuns;
+     if (clusterEl) clusterEl.textContent = stats.goodClusters;
+     if (exclEl) exclEl.textContent = stats.exclusionPercent + '%';
+     if (bestEl) bestEl.textContent = stats.bestScore.toFixed(1);
++
++    // Make it explicit that this memory is durable (localStorage) and survives resets/reloads
++    if (persistEl) {
++      if (stats.totalRuns > 0) {
++        persistEl.innerHTML = `💾 Lernspeicher gespeichert &middot; ${stats.totalRuns} Einträge &middot; zuletzt aktualisiert ${App.formatRelativeTime(stats.lastUpdated)} &middot; bleibt nach Reload/Reset erhalten`;
++        persistEl.style.color = 'var(--teal)';
++      } else {
++        persistEl.innerHTML = `💾 Noch kein Lernspeicher vorhanden. Starte den Optimizer, um dauerhaft (über Sitzungen und Resets hinweg) zu lernen.`;
++        persistEl.style.color = 'var(--text-faint)';
++      }
++    }
+     
+     if (bestParamsEl) {
+       if (stats.bestParams) {
+@@ -832,7 +844,8 @@ App.UI = {
+     const optStatusText = document.getElementById('opt-status-text');
+     if (optStatusText && (!App.Optimizer || !App.Optimizer.state.isRunning)) {
+       if (totalRuns > 0) {
+-        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests)`;
++        const stats = App.Optimizer.getWissensstand();
++        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests, zuletzt ${App.formatRelativeTime(stats.lastUpdated)})`;
+         optStatusText.style.color = 'var(--teal)';
+       } else {
+         optStatusText.textContent = 'Bereit (Keine Lern-Daten)';
+diff --git a/paper-perp.html b/paper-perp.html
+index 484b0d8..24caf9e 100644
+--- a/paper-perp.html
++++ b/paper-perp.html
+@@ -314,33 +314,68 @@
+               <div class="backtest-section">
+                 <div class="backtest-sec-title">1. Kerzen-Historie laden</div>
+                 <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+-                  <div class="field" style="flex: 2; margin-bottom: 0;">
++                  <div class="field" style="flex: 1; margin-bottom: 0;">
+                     <label>Symbol</label>
+                     <div class="input-wrap">
+                       <input type="text" id="backtest-symbol" value="BTCUSDT" style="text-transform: uppercase;">
+                     </div>
+                   </div>
+-                  <div class="field" style="flex: 3; margin-bottom: 0;">
+-                    <label>Zeitraum (Tage)</label>
+-                    <div class="input-wrap">
+-                      <select id="backtest-days" class="backtest-select">
+-                        <option value="1">1 Tag (1.440 Kerzen)</option>
+-                        <option value="3">3 Tage (4.320 Kerzen)</option>
+-                        <option value="7" selected>7 Tage (10.080 Kerzen)</option>
+-                        <option value="14">14 Tage (20.160 Kerzen)</option>
+-                        <option value="30">30 Tage (43.200 Kerzen)</option>
+-                      </select>
+-                    </div>
++                </div>
++
++                <div class="field" style="margin-bottom: 8px;">
++                  <label>Enddatum (Anker)</label>
++                  <div style="display: flex; gap: 12px; align-items: center; font-size: 11px; color: var(--text-dim); margin-bottom: 6px;">
++                    <label style="display:flex; align-items:center; gap:4px; cursor:pointer;">
++                      <input type="radio" name="backtest-end-mode" id="backtest-end-mode-live" value="live" checked> Live (jetzt)
++                    </label>
++                    <label style="display:flex; align-items:center; gap:4px; cursor:pointer;">
++                      <input type="radio" name="backtest-end-mode" id="backtest-end-mode-custom" value="custom"> Bestimmtes Datum
++                    </label>
++                  </div>
++                  <div class="input-wrap" id="backtest-end-date-wrap" style="display: none;">
++                    <input type="date" id="backtest-end-date">
+                   </div>
+                 </div>
+-                <button type="button" id="btn-load-backtest-data" class="backtest-btn">Daten laden</button>
++
++                <div class="field" style="margin-bottom: 8px;">
++                  <label>Zeitraum (rückwirkend ab Enddatum)</label>
++                  <div class="input-wrap">
++                    <select id="backtest-days" class="backtest-select">
++                      <option value="1">1 Tag</option>
++                      <option value="3">3 Tage</option>
++                      <option value="7" selected>7 Tage</option>
++                      <option value="14">14 Tage</option>
++                      <option value="30">30 Tage</option>
++                      <option value="60">60 Tage</option>
++                      <option value="90">90 Tage (~3 Monate)</option>
++                      <option value="180">180 Tage (~6 Monate)</option>
++                      <option value="365">365 Tage (1 Jahr)</option>
++                      <option value="730">730 Tage (2 Jahre)</option>
++                      <option value="1095">1095 Tage (3 Jahre)</option>
++                    </select>
++                  </div>
++                </div>
++
++                <div id="backtest-estimate" style="font-size: 10px; color: var(--text-dim); margin-bottom: 8px;"></div>
++
++                <div style="display: flex; gap: 6px;">
++                  <button type="button" id="btn-load-backtest-data" class="backtest-btn" style="flex: 1;">Daten laden</button>
++                  <button type="button" id="btn-clear-candle-cache" class="backtest-btn" title="Aktuell geladenen Datensatz aus dem Browser-Cache (IndexedDB) entfernen" style="flex: 0 0 auto; padding: 6px 10px; border: 1px dashed var(--border); background: transparent; color: var(--text-dim);" disabled>Aktiven Cache leeren</button>
++                </div>
+                 <div id="backtest-loader-status" style="font-size: 10px; color: var(--text-dim); margin-top: 6px; font-weight: 500;">Keine Kerzen geladen.</div>
+                 <!-- Progress bar -->
+                 <div id="backtest-progress-container" style="display: none; margin-top: 8px; background: var(--surface-3); border-radius: 4px; overflow: hidden; height: 6px; border: 1px solid var(--border-soft);">
+                   <div id="backtest-progress-bar" style="background: var(--teal); width: 0%; height: 100%; transition: width 0.1s ease;"></div>
+                 </div>
++
++                <!-- Saved dataset library: lets you keep multiple historical windows (market phases) cached locally -->
++                <div style="margin-top: 10px;">
++                  <div style="font-size: 9px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px;">💾 Gespeicherte Datensätze (Marktphasen)</div>
++                  <div id="backtest-cache-list" style="display: flex; flex-direction: column; gap: 4px;"></div>
++                </div>
+               </div>
+ 
++
+               <!-- Sub-section: Single Parameters -->
+               <div class="backtest-section" style="margin-top: 12px;">
+                 <div class="backtest-sec-title">2. Backtest-Parameter</div>
+@@ -556,6 +591,7 @@
+ 
+                 <!-- Sub-tab content: Wissensstand (Lernspeicher) -->
+                 <div class="res-tab-content" id="res-tab-wissensstand" style="display: none;">
++                  <div id="wissen-persistence-status" style="font-size: 10px; font-weight: 600; padding: 6px 8px; background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 4px; margin-top: 4px;">💾 Lernspeicher wird geladen...</div>
+                   <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
+                     <div style="background: var(--surface-2); border: 1px solid var(--border-soft); padding: 12px; border-radius: 6px; text-align: center;">
+                       <div style="font-size: 9px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px;">Datenbank-Einträge</div>
