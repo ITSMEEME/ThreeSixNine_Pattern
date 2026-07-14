@@ -829,6 +829,7 @@ App.Backtest = {
 
     const { train: baseTrain, test: baseTest } = App.Optimizer.splitCandlesForValidation(App.state.backtestCandles);
     const oosActive = !!baseTest;
+    const searchRulesEnabled = document.getElementById('opt-search-rules')?.checked ?? true;
 
     const validationInfoEl = document.getElementById('opt-validation-info');
     if (validationInfoEl) {
@@ -840,6 +841,9 @@ App.Backtest = {
       lines.push(phaseDatasets.length > 0
         ? `✓ Multi-Phasen-Check aktiv (${phaseDatasets.length} weitere gespeicherte Zeiträume: ${phaseDatasets.map(p => p.label).join(', ')})`
         : 'ℹ Multi-Phasen-Check inaktiv — lade weitere Zeiträume in der Datensatz-Bibliothek, um Strategien phasenübergreifend zu prüfen');
+      lines.push(searchRulesEnabled
+        ? `✓ Regel-Kombinationen werden mitgesucht (${App.Optimizer.RULE_SEARCH_INTERVALS.join('/')}, 1-2 Timeframes)`
+        : 'ℹ Regel-Suche deaktiviert — nutzt ausschließlich die aktuell konfigurierten Regeln');
       validationInfoEl.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
     }
 
@@ -916,15 +920,33 @@ App.Backtest = {
           return;
         }
 
+        // Pick an entry-rule combination for this candidate. In later (exploitation) phases,
+        // strongly prefer rule combinations that already scored well; still leave room for
+        // random exploration so the search doesn't get stuck on an early lucky rule set.
+        let candidateRules = App.state.rules;
+        if (searchRulesEnabled) {
+          if (phase >= 3) {
+            const topRuleSets = App.Optimizer.getTopRuleSets(3);
+            if (topRuleSets.length > 0 && Math.random() < 0.85) {
+              candidateRules = topRuleSets[Math.floor(Math.random() * topRuleSets.length)].rules;
+            } else {
+              candidateRules = App.Optimizer.pickRandomRuleSet(true);
+            }
+          } else {
+            candidateRules = App.Optimizer.pickRandomRuleSet(true);
+          }
+        }
+        const rulesSignature = App.Optimizer.getRulesSignature(candidateRules);
+
         let bounds = App.Optimizer.state.bounds;
         
         if (phase === 3 || phase === 5) {
-          const clusters = App.Optimizer.getClusterBounds();
+          const clusters = App.Optimizer.getClusterBounds(rulesSignature);
           if (clusters && Math.random() < 0.9) {
             bounds = clusters;
           }
         } else if (phase === 7) {
-          const clusters = App.Optimizer.getClusterBounds();
+          const clusters = App.Optimizer.getClusterBounds(rulesSignature);
           if (clusters && Math.random() < 0.95) {
             bounds = {
               leverage: {
@@ -957,7 +979,7 @@ App.Backtest = {
 
         while (attempts < 100) {
           const candidate = App.Optimizer.generateCandidate(bounds);
-          cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate, datasetRange);
+          cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, candidateRules, candidate, datasetRange);
           if (!cachedRes) {
             combo = candidate;
             break;
@@ -969,7 +991,7 @@ App.Backtest = {
           attempts = 0;
           while (attempts < 100) {
             const candidate = App.Optimizer.generateCandidate(App.Optimizer.state.bounds);
-            cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate, datasetRange);
+            cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, candidateRules, candidate, datasetRange);
             if (!cachedRes) {
               combo = candidate;
               break;
@@ -992,7 +1014,7 @@ App.Backtest = {
           maxOpen: combo.maxOpen,
           tpPercent: combo.tpPercent,
           slPercent: combo.slPercent,
-          rules: App.state.rules,
+          rules: candidateRules,
           feeRate: App.CONFIG.feeRate,
           spread: App.CONFIG.spread
         };
@@ -1032,7 +1054,7 @@ App.Backtest = {
         App.Optimizer.saveToDb(
           App.Optimizer.state.symbol,
           App.Optimizer.state.timeframe,
-          App.state.rules,
+          candidateRules,
           combo,
           { trainRes, testRes, scores, stability, crossPhase },
           marketClass,

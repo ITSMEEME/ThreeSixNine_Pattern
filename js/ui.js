@@ -666,7 +666,7 @@ App.UI = {
     if (!tbody) return;
 
     if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 16px 0;">Keine aufgezeichneten Tests für diesen Filter.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 16px 0;">Keine aufgezeichneten Tests für diesen Filter.</td></tr>`;
       return;
     }
 
@@ -694,9 +694,10 @@ App.UI = {
       }
 
       return `
-        <tr class="clickable" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}">
+        <tr class="clickable" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}" data-rules='${JSON.stringify(item.params.rules || App.state.rules)}'>
           <td style="font-weight: bold; color: ${scoreColor};">${item.score}</td>
           <td style="font-size: 8px; white-space: nowrap; letter-spacing: 0.3px;">${badgeParts.join(' ')}</td>
+          <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(item.params.rules)}</td>
           <td>${item.params.leverage}x</td>
           <td>${item.params.cooldownMin}m</td>
           <td>${item.params.tpPercent}%</td>
@@ -737,9 +738,26 @@ App.UI = {
         App.state.bot.slPercent = sl;
         App.state.bot.maxOpen = maxOpen;
 
+        // Apply the entry-rule combination this result actually used — the numeric params only
+        // make sense together with the rules they were tested against (e.g. "1m+15m" bull/bear)
+        let ruleLabel = '';
+        try {
+          const rules = JSON.parse(tr.dataset.rules);
+          if (rules && rules.long) {
+            App.state.rules = rules;
+            App.UI.renderRules();
+            ruleLabel = `, Regeln=${App.Optimizer.getRuleLabel(rules)}`;
+            App.API.loadActiveIntervalsHistory().then(() => {
+              App.API.connectWs(App.state.timeframe);
+            });
+          }
+        } catch (e) {
+          console.error('Konnte Regeln des Leaderboard-Eintrags nicht anwenden:', e);
+        }
+
         App.Bot.renderBotUI();
         App.saveToLocalStorage();
-        App.UI.showToast(`Parameter übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}`);
+        App.UI.showToast(`Parameter übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}`);
       });
     });
   },
@@ -854,6 +872,7 @@ App.UI = {
         }
         bestParamsEl.innerHTML = `
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px;">
+            <span>Regeln: <strong>${App.Optimizer.getRuleLabel(p.rules)}</strong></span>
             <span>Hebel: <strong>${p.leverage}x</strong></span>
             <span>Cooldown: <strong>${p.cooldownMin}m</strong></span>
             <span>Take Profit: <strong>${p.tpPercent}%</strong></span>

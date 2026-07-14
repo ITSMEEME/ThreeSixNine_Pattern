@@ -118,6 +118,67 @@ App.Optimizer = {
     return Math.round(Math.max(0, 100 - avgDrop * 2.5) * 10) / 10;
   },
 
+  // Intervals the optimizer is allowed to combine when searching for entry-rule combinations.
+  // Kept deliberately bounded (not the full UI list up to 1d) so the search space stays tractable.
+  RULE_SEARCH_INTERVALS: ['1m', '5m', '15m', '1h', '4h'],
+
+  // All single- and dual-interval rule combinations, mirrored (same intervals bullish for long /
+  // bearish for short). E.g. ['1m','15m'] -> long needs 1m+15m bull, short needs 1m+15m bear.
+  generateRuleSetCandidates() {
+    const intervals = this.RULE_SEARCH_INTERVALS;
+    const combos = [];
+    intervals.forEach(iv => combos.push([iv]));
+    for (let i = 0; i < intervals.length; i++) {
+      for (let j = i + 1; j < intervals.length; j++) {
+        combos.push([intervals[i], intervals[j]]);
+      }
+    }
+    return combos.map(ivs => ({
+      long: ivs.map(iv => ({ interval: iv, state: 'bull' })),
+      short: ivs.map(iv => ({ interval: iv, state: 'bear' })),
+      label: ivs.join('+')
+    }));
+  },
+
+  getRulesSignature(rules) {
+    if (!rules) return '';
+    return JSON.stringify(rules.long || []) + '|' + JSON.stringify(rules.short || []);
+  },
+
+  getRuleLabel(rules) {
+    if (!rules || !rules.long || rules.long.length === 0) return '–';
+    return rules.long.map(r => r.interval).join('+');
+  },
+
+  // Random rule set for exploration. Always gives the user's own manually configured rules a
+  // chance too, so the search never fully abandons what they set up in the UI.
+  pickRandomRuleSet(includeCurrent = true) {
+    const candidates = this.generateRuleSetCandidates();
+    if (includeCurrent && App.state.rules && App.state.rules.long && App.state.rules.long.length > 0) {
+      candidates.push({
+        long: App.state.rules.long,
+        short: App.state.rules.short,
+        label: this.getRuleLabel(App.state.rules) + ' (eigene)'
+      });
+    }
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  },
+
+  // Groups all saved test results by their rule combination and returns the best-scoring
+  // combinations, so later optimizer phases can concentrate on rule sets that already proved
+  // themselves instead of only exploring randomly.
+  getTopRuleSets(topN = 3) {
+    const groups = {};
+    Object.values(App.state.optimizerDb).forEach(entry => {
+      if (!entry.params || !entry.params.rules) return;
+      const sig = this.getRulesSignature(entry.params.rules);
+      if (!groups[sig] || groups[sig].score < entry.score) {
+        groups[sig] = { rules: entry.params.rules, score: entry.score, label: this.getRuleLabel(entry.params.rules), signature: sig };
+      }
+    });
+    return Object.values(groups).sort((a, b) => b.score - a.score).slice(0, topN);
+  },
+
   getUniqueKey(symbol, rules, params, datasetRange) {
     // Unique key to prevent double testing. Includes the dataset's time range so the same
     // parameter combo tested against different historical windows (market phases) is stored
@@ -285,9 +346,18 @@ App.Optimizer = {
     return { weights, ratings };
   },
 
-  getClusterBounds() {
+  getClusterBounds(rulesSignature) {
     const db = Object.values(App.state.optimizerDb);
-    const goodRuns = db.filter(x => x.score >= 70);
+    let goodRuns = db.filter(x => x.score >= 70);
+
+    // Prefer clustering only within the same rule combination — mixing e.g. "1m" and "1m+4h"
+    // strategies' numeric params doesn't make sense. Fall back to all rule sets if too few
+    // same-ruleset samples exist yet.
+    if (rulesSignature) {
+      const sameRules = goodRuns.filter(x => this.getRulesSignature(x.params.rules) === rulesSignature);
+      if (sameRules.length >= 5) goodRuns = sameRules;
+    }
+
     if (goodRuns.length < 5) return null;
     
     const bounds = {

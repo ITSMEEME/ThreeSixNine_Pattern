@@ -1,0 +1,272 @@
+diff --git a/js/backtest.js b/js/backtest.js
+index 6e95647..62ddb80 100644
+--- a/js/backtest.js
++++ b/js/backtest.js
+@@ -829,6 +829,7 @@ App.Backtest = {
+ 
+     const { train: baseTrain, test: baseTest } = App.Optimizer.splitCandlesForValidation(App.state.backtestCandles);
+     const oosActive = !!baseTest;
++    const searchRulesEnabled = document.getElementById('opt-search-rules')?.checked ?? true;
+ 
+     const validationInfoEl = document.getElementById('opt-validation-info');
+     if (validationInfoEl) {
+@@ -840,6 +841,9 @@ App.Backtest = {
+       lines.push(phaseDatasets.length > 0
+         ? `✓ Multi-Phasen-Check aktiv (${phaseDatasets.length} weitere gespeicherte Zeiträume: ${phaseDatasets.map(p => p.label).join(', ')})`
+         : 'ℹ Multi-Phasen-Check inaktiv — lade weitere Zeiträume in der Datensatz-Bibliothek, um Strategien phasenübergreifend zu prüfen');
++      lines.push(searchRulesEnabled
++        ? `✓ Regel-Kombinationen werden mitgesucht (${App.Optimizer.RULE_SEARCH_INTERVALS.join('/')}, 1-2 Timeframes)`
++        : 'ℹ Regel-Suche deaktiviert — nutzt ausschließlich die aktuell konfigurierten Regeln');
+       validationInfoEl.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+     }
+ 
+@@ -916,15 +920,33 @@ App.Backtest = {
+           return;
+         }
+ 
++        // Pick an entry-rule combination for this candidate. In later (exploitation) phases,
++        // strongly prefer rule combinations that already scored well; still leave room for
++        // random exploration so the search doesn't get stuck on an early lucky rule set.
++        let candidateRules = App.state.rules;
++        if (searchRulesEnabled) {
++          if (phase >= 3) {
++            const topRuleSets = App.Optimizer.getTopRuleSets(3);
++            if (topRuleSets.length > 0 && Math.random() < 0.85) {
++              candidateRules = topRuleSets[Math.floor(Math.random() * topRuleSets.length)].rules;
++            } else {
++              candidateRules = App.Optimizer.pickRandomRuleSet(true);
++            }
++          } else {
++            candidateRules = App.Optimizer.pickRandomRuleSet(true);
++          }
++        }
++        const rulesSignature = App.Optimizer.getRulesSignature(candidateRules);
++
+         let bounds = App.Optimizer.state.bounds;
+         
+         if (phase === 3 || phase === 5) {
+-          const clusters = App.Optimizer.getClusterBounds();
++          const clusters = App.Optimizer.getClusterBounds(rulesSignature);
+           if (clusters && Math.random() < 0.9) {
+             bounds = clusters;
+           }
+         } else if (phase === 7) {
+-          const clusters = App.Optimizer.getClusterBounds();
++          const clusters = App.Optimizer.getClusterBounds(rulesSignature);
+           if (clusters && Math.random() < 0.95) {
+             bounds = {
+               leverage: {
+@@ -957,7 +979,7 @@ App.Backtest = {
+ 
+         while (attempts < 100) {
+           const candidate = App.Optimizer.generateCandidate(bounds);
+-          cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate, datasetRange);
++          cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, candidateRules, candidate, datasetRange);
+           if (!cachedRes) {
+             combo = candidate;
+             break;
+@@ -969,7 +991,7 @@ App.Backtest = {
+           attempts = 0;
+           while (attempts < 100) {
+             const candidate = App.Optimizer.generateCandidate(App.Optimizer.state.bounds);
+-            cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, App.state.rules, candidate, datasetRange);
++            cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, candidateRules, candidate, datasetRange);
+             if (!cachedRes) {
+               combo = candidate;
+               break;
+@@ -992,7 +1014,7 @@ App.Backtest = {
+           maxOpen: combo.maxOpen,
+           tpPercent: combo.tpPercent,
+           slPercent: combo.slPercent,
+-          rules: App.state.rules,
++          rules: candidateRules,
+           feeRate: App.CONFIG.feeRate,
+           spread: App.CONFIG.spread
+         };
+@@ -1032,7 +1054,7 @@ App.Backtest = {
+         App.Optimizer.saveToDb(
+           App.Optimizer.state.symbol,
+           App.Optimizer.state.timeframe,
+-          App.state.rules,
++          candidateRules,
+           combo,
+           { trainRes, testRes, scores, stability, crossPhase },
+           marketClass,
+diff --git a/js/optimizer.js b/js/optimizer.js
+index 04140ec..0709d75 100644
+--- a/js/optimizer.js
++++ b/js/optimizer.js
+@@ -118,6 +118,67 @@ App.Optimizer = {
+     return Math.round(Math.max(0, 100 - avgDrop * 2.5) * 10) / 10;
+   },
+ 
++  // Intervals the optimizer is allowed to combine when searching for entry-rule combinations.
++  // Kept deliberately bounded (not the full UI list up to 1d) so the search space stays tractable.
++  RULE_SEARCH_INTERVALS: ['1m', '5m', '15m', '1h', '4h'],
++
++  // All single- and dual-interval rule combinations, mirrored (same intervals bullish for long /
++  // bearish for short). E.g. ['1m','15m'] -> long needs 1m+15m bull, short needs 1m+15m bear.
++  generateRuleSetCandidates() {
++    const intervals = this.RULE_SEARCH_INTERVALS;
++    const combos = [];
++    intervals.forEach(iv => combos.push([iv]));
++    for (let i = 0; i < intervals.length; i++) {
++      for (let j = i + 1; j < intervals.length; j++) {
++        combos.push([intervals[i], intervals[j]]);
++      }
++    }
++    return combos.map(ivs => ({
++      long: ivs.map(iv => ({ interval: iv, state: 'bull' })),
++      short: ivs.map(iv => ({ interval: iv, state: 'bear' })),
++      label: ivs.join('+')
++    }));
++  },
++
++  getRulesSignature(rules) {
++    if (!rules) return '';
++    return JSON.stringify(rules.long || []) + '|' + JSON.stringify(rules.short || []);
++  },
++
++  getRuleLabel(rules) {
++    if (!rules || !rules.long || rules.long.length === 0) return '–';
++    return rules.long.map(r => r.interval).join('+');
++  },
++
++  // Random rule set for exploration. Always gives the user's own manually configured rules a
++  // chance too, so the search never fully abandons what they set up in the UI.
++  pickRandomRuleSet(includeCurrent = true) {
++    const candidates = this.generateRuleSetCandidates();
++    if (includeCurrent && App.state.rules && App.state.rules.long && App.state.rules.long.length > 0) {
++      candidates.push({
++        long: App.state.rules.long,
++        short: App.state.rules.short,
++        label: this.getRuleLabel(App.state.rules) + ' (eigene)'
++      });
++    }
++    return candidates[Math.floor(Math.random() * candidates.length)];
++  },
++
++  // Groups all saved test results by their rule combination and returns the best-scoring
++  // combinations, so later optimizer phases can concentrate on rule sets that already proved
++  // themselves instead of only exploring randomly.
++  getTopRuleSets(topN = 3) {
++    const groups = {};
++    Object.values(App.state.optimizerDb).forEach(entry => {
++      if (!entry.params || !entry.params.rules) return;
++      const sig = this.getRulesSignature(entry.params.rules);
++      if (!groups[sig] || groups[sig].score < entry.score) {
++        groups[sig] = { rules: entry.params.rules, score: entry.score, label: this.getRuleLabel(entry.params.rules), signature: sig };
++      }
++    });
++    return Object.values(groups).sort((a, b) => b.score - a.score).slice(0, topN);
++  },
++
+   getUniqueKey(symbol, rules, params, datasetRange) {
+     // Unique key to prevent double testing. Includes the dataset's time range so the same
+     // parameter combo tested against different historical windows (market phases) is stored
+@@ -285,9 +346,18 @@ App.Optimizer = {
+     return { weights, ratings };
+   },
+ 
+-  getClusterBounds() {
++  getClusterBounds(rulesSignature) {
+     const db = Object.values(App.state.optimizerDb);
+-    const goodRuns = db.filter(x => x.score >= 70);
++    let goodRuns = db.filter(x => x.score >= 70);
++
++    // Prefer clustering only within the same rule combination — mixing e.g. "1m" and "1m+4h"
++    // strategies' numeric params doesn't make sense. Fall back to all rule sets if too few
++    // same-ruleset samples exist yet.
++    if (rulesSignature) {
++      const sameRules = goodRuns.filter(x => this.getRulesSignature(x.params.rules) === rulesSignature);
++      if (sameRules.length >= 5) goodRuns = sameRules;
++    }
++
+     if (goodRuns.length < 5) return null;
+     
+     const bounds = {
+diff --git a/js/ui.js b/js/ui.js
+index 51c7d12..9baef9d 100644
+--- a/js/ui.js
++++ b/js/ui.js
+@@ -666,7 +666,7 @@ App.UI = {
+     if (!tbody) return;
+ 
+     if (list.length === 0) {
+-      tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 16px 0;">Keine aufgezeichneten Tests für diesen Filter.</td></tr>`;
++      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 16px 0;">Keine aufgezeichneten Tests für diesen Filter.</td></tr>`;
+       return;
+     }
+ 
+@@ -694,9 +694,10 @@ App.UI = {
+       }
+ 
+       return `
+-        <tr class="clickable" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}">
++        <tr class="clickable" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}" data-rules='${JSON.stringify(item.params.rules || App.state.rules)}'>
+           <td style="font-weight: bold; color: ${scoreColor};">${item.score}</td>
+           <td style="font-size: 8px; white-space: nowrap; letter-spacing: 0.3px;">${badgeParts.join(' ')}</td>
++          <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(item.params.rules)}</td>
+           <td>${item.params.leverage}x</td>
+           <td>${item.params.cooldownMin}m</td>
+           <td>${item.params.tpPercent}%</td>
+@@ -737,9 +738,26 @@ App.UI = {
+         App.state.bot.slPercent = sl;
+         App.state.bot.maxOpen = maxOpen;
+ 
++        // Apply the entry-rule combination this result actually used — the numeric params only
++        // make sense together with the rules they were tested against (e.g. "1m+15m" bull/bear)
++        let ruleLabel = '';
++        try {
++          const rules = JSON.parse(tr.dataset.rules);
++          if (rules && rules.long) {
++            App.state.rules = rules;
++            App.UI.renderRules();
++            ruleLabel = `, Regeln=${App.Optimizer.getRuleLabel(rules)}`;
++            App.API.loadActiveIntervalsHistory().then(() => {
++              App.API.connectWs(App.state.timeframe);
++            });
++          }
++        } catch (e) {
++          console.error('Konnte Regeln des Leaderboard-Eintrags nicht anwenden:', e);
++        }
++
+         App.Bot.renderBotUI();
+         App.saveToLocalStorage();
+-        App.UI.showToast(`Parameter übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}`);
++        App.UI.showToast(`Parameter übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}`);
+       });
+     });
+   },
+@@ -854,6 +872,7 @@ App.UI = {
+         }
+         bestParamsEl.innerHTML = `
+           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px;">
++            <span>Regeln: <strong>${App.Optimizer.getRuleLabel(p.rules)}</strong></span>
+             <span>Hebel: <strong>${p.leverage}x</strong></span>
+             <span>Cooldown: <strong>${p.cooldownMin}m</strong></span>
+             <span>Take Profit: <strong>${p.tpPercent}%</strong></span>
+diff --git a/paper-perp.html b/paper-perp.html
+index b0b8253..49f2481 100644
+--- a/paper-perp.html
++++ b/paper-perp.html
+@@ -477,6 +477,11 @@
+                 </div>
+                 <div id="opt-validation-info" style="font-size: 9px; color: var(--text-faint); margin-bottom: 12px; line-height: 1.5;"></div>
+ 
++                <label style="display:flex; align-items:center; gap:6px; font-size: 10px; color: var(--text-dim); margin-bottom: 10px; cursor: pointer;">
++                  <input type="checkbox" id="opt-search-rules" checked>
++                  Regel-Kombinationen mit durchsuchen (Timeframes 1m/5m/15m/1h/4h, statt nur die aktuell konfigurierten Regeln)
++                </label>
++
+                 <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                   <button type="button" id="btn-start-optimizer" class="backtest-btn secondary" style="flex: 2; margin-top: 0;" disabled>Lernen starten</button>
+                   <button type="button" id="btn-stop-optimizer" class="backtest-btn" style="flex: 1; margin-top: 0; background: var(--short); color: white;" disabled>Stopp</button>
+@@ -563,6 +568,7 @@
+                         <tr>
+                           <th>Score</th>
+                           <th>Robust</th>
++                          <th>Regeln</th>
+                           <th>Hebel</th>
+                           <th>CD</th>
+                           <th>TP %</th>

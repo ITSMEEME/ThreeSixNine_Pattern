@@ -477,6 +477,11 @@
                 </div>
                 <div id="opt-validation-info" style="font-size: 9px; color: var(--text-faint); margin-bottom: 12px; line-height: 1.5;"></div>
 
+                <label style="display:flex; align-items:center; gap:6px; font-size: 10px; color: var(--text-dim); margin-bottom: 10px; cursor: pointer;">
+                  <input type="checkbox" id="opt-search-rules" checked>
+                  Regel-Kombinationen mit durchsuchen (Timeframes 1m/5m/15m/1h/4h, statt nur die aktuell konfigurierten Regeln)
+                </label>
+
                 <div style="display: flex; gap: 8px; margin-bottom: 8px;">
                   <button type="button" id="btn-start-optimizer" class="backtest-btn secondary" style="flex: 2; margin-top: 0;" disabled>Lernen starten</button>
                   <button type="button" id="btn-stop-optimizer" class="backtest-btn" style="flex: 1; margin-top: 0; background: var(--short); color: white;" disabled>Stopp</button>
@@ -563,6 +568,7 @@
                         <tr>
                           <th>Score</th>
                           <th>Robust</th>
+                          <th>Regeln</th>
                           <th>Hebel</th>
                           <th>CD</th>
                           <th>TP %</th>
