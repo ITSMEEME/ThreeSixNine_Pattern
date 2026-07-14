@@ -647,14 +647,14 @@ App.UI = {
     const resetOptDbBtn = document.getElementById('btn-reset-optimizer-db');
     if (resetOptDbBtn) {
       resetOptDbBtn.addEventListener('click', () => {
-        if (confirm('Möchtest du den gesamten Lernspeicher des Optimizers wirklich löschen?')) {
+        if (confirm('Lernspeicher (alle Testergebnisse, Leaderboard, Wissensstand) wirklich löschen?\n\nDeine gespeicherten Kerzen-Datensätze (Marktphasen-Bibliothek) bleiben davon unberührt und müssen nicht erneut heruntergeladen werden.')) {
           App.state.optimizerDb = {};
           App.saveToLocalStorage();
           this.renderLeaderboard('all');
           this.renderHeatmaps();
           this.renderWissensstand();
           this.syncResultsVisibility();
-          App.UI.showToast('Lernspeicher gelöscht.');
+          App.UI.showToast('Lernspeicher gelöscht. Kerzen-Cache bleibt erhalten.');
         }
       });
     }
@@ -666,16 +666,37 @@ App.UI = {
     if (!tbody) return;
 
     if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="10" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 16px 0;">Keine aufgezeichneten Tests für diesen Filter.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 16px 0;">Keine aufgezeichneten Tests für diesen Filter.</td></tr>`;
       return;
     }
 
     tbody.innerHTML = list.map(item => {
       const returnCls = item.results.totalReturnPercent >= 0 ? 'long' : 'short';
       const scoreColor = item.score >= 80 ? 'var(--long)' : item.score >= 50 ? '#ffb020' : 'var(--short)';
+
+      const v = item.validation || {};
+      const badgeParts = [];
+      if (v.validated) {
+        const gap = v.trainScore - v.testScore;
+        const oosColor = gap <= 15 ? 'var(--long)' : gap <= 30 ? '#ffb020' : 'var(--short)';
+        badgeParts.push(`<span style="color:${oosColor};" title="Training: ${v.trainScore} · Out-of-Sample-Test: ${v.testScore}">OOS</span>`);
+      } else {
+        badgeParts.push(`<span style="color:var(--text-faint);" title="Zeitraum zu kurz für Out-of-Sample-Split">–</span>`);
+      }
+      if (v.stabilityScore !== null && v.stabilityScore !== undefined) {
+        const staColor = v.stabilityScore >= 80 ? 'var(--long)' : v.stabilityScore >= 50 ? '#ffb020' : 'var(--short)';
+        badgeParts.push(`<span style="color:${staColor};" title="Stabilität bei Parameter-Variation: ${v.stabilityScore}">STA</span>`);
+      }
+      if (v.crossPhaseScore !== null && v.crossPhaseScore !== undefined) {
+        const phzColor = v.crossPhaseScore >= 70 ? 'var(--long)' : v.crossPhaseScore >= 40 ? '#ffb020' : 'var(--short)';
+        const detail = (v.crossPhaseDetails || []).map(p => `${p.label}: ${p.score}`).join(', ');
+        badgeParts.push(`<span style="color:${phzColor};" title="Ø Score in anderen Marktphasen: ${v.crossPhaseScore} (${detail})">PHZ</span>`);
+      }
+
       return `
         <tr class="clickable" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}">
           <td style="font-weight: bold; color: ${scoreColor};">${item.score}</td>
+          <td style="font-size: 8px; white-space: nowrap; letter-spacing: 0.3px;">${badgeParts.join(' ')}</td>
           <td>${item.params.leverage}x</td>
           <td>${item.params.cooldownMin}m</td>
           <td>${item.params.tpPercent}%</td>
@@ -793,15 +814,44 @@ App.UI = {
     const exclEl = document.getElementById('wissen-exclusion');
     const bestEl = document.getElementById('wissen-best-score');
     const bestParamsEl = document.getElementById('wissen-best-params');
+    const persistEl = document.getElementById('wissen-persistence-status');
     
     if (runEl) runEl.textContent = stats.totalRuns;
     if (clusterEl) clusterEl.textContent = stats.goodClusters;
     if (exclEl) exclEl.textContent = stats.exclusionPercent + '%';
     if (bestEl) bestEl.textContent = stats.bestScore.toFixed(1);
+
+    // Make it explicit that this memory is durable (localStorage) and survives resets/reloads
+    if (persistEl) {
+      if (stats.totalRuns > 0) {
+        persistEl.innerHTML = `💾 Lernspeicher gespeichert &middot; ${stats.totalRuns} Einträge &middot; zuletzt aktualisiert ${App.formatRelativeTime(stats.lastUpdated)} &middot; bleibt nach Reload/Reset erhalten`;
+        persistEl.style.color = 'var(--teal)';
+      } else {
+        persistEl.innerHTML = `💾 Noch kein Lernspeicher vorhanden. Starte den Optimizer, um dauerhaft (über Sitzungen und Resets hinweg) zu lernen.`;
+        persistEl.style.color = 'var(--text-faint)';
+      }
+    }
     
     if (bestParamsEl) {
       if (stats.bestParams) {
         const p = stats.bestParams;
+        const v = stats.bestValidation || {};
+        let validationHtml = '';
+        if (v.validated) {
+          const gap = v.trainScore - v.testScore;
+          const gapColor = gap <= 15 ? 'var(--long)' : gap <= 30 ? '#ffb020' : 'var(--short)';
+          validationHtml += `<div style="margin-top: 6px; color: ${gapColor};">Out-of-Sample: Training ${v.trainScore} &middot; Test (unbekannte Daten) ${v.testScore}</div>`;
+        } else {
+          validationHtml += `<div style="margin-top: 6px; color: var(--text-faint);">Kein Out-of-Sample-Test (Zeitraum zu kurz)</div>`;
+        }
+        if (v.stabilityScore !== null && v.stabilityScore !== undefined) {
+          const staColor = v.stabilityScore >= 80 ? 'var(--long)' : v.stabilityScore >= 50 ? '#ffb020' : 'var(--short)';
+          validationHtml += `<div style="color: ${staColor};">Stabilität bei Parameter-Variation: ${v.stabilityScore}/100</div>`;
+        }
+        if (v.crossPhaseScore !== null && v.crossPhaseScore !== undefined) {
+          const phzColor = v.crossPhaseScore >= 70 ? 'var(--long)' : v.crossPhaseScore >= 40 ? '#ffb020' : 'var(--short)';
+          validationHtml += `<div style="color: ${phzColor};">Ø Score in weiteren Marktphasen: ${v.crossPhaseScore}/100</div>`;
+        }
         bestParamsEl.innerHTML = `
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px;">
             <span>Hebel: <strong>${p.leverage}x</strong></span>
@@ -810,6 +860,7 @@ App.UI = {
             <span>Stop Loss: <strong>${p.slPercent}%</strong></span>
             <span>Max. Trades: <strong>${p.maxOpen || 1}</strong></span>
           </div>
+          ${validationHtml}
         `;
       } else {
         bestParamsEl.textContent = 'Keine Daten vorhanden. Führe den Optimizer aus.';
@@ -832,7 +883,8 @@ App.UI = {
     const optStatusText = document.getElementById('opt-status-text');
     if (optStatusText && (!App.Optimizer || !App.Optimizer.state.isRunning)) {
       if (totalRuns > 0) {
-        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests)`;
+        const stats = App.Optimizer.getWissensstand();
+        optStatusText.textContent = `Bereit (Lernspeicher geladen: ${totalRuns} Tests, zuletzt ${App.formatRelativeTime(stats.lastUpdated)})`;
         optStatusText.style.color = 'var(--teal)';
       } else {
         optStatusText.textContent = 'Bereit (Keine Lern-Daten)';

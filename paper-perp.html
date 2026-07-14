@@ -314,32 +314,67 @@
               <div class="backtest-section">
                 <div class="backtest-sec-title">1. Kerzen-Historie laden</div>
                 <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                  <div class="field" style="flex: 2; margin-bottom: 0;">
+                  <div class="field" style="flex: 1; margin-bottom: 0;">
                     <label>Symbol</label>
                     <div class="input-wrap">
                       <input type="text" id="backtest-symbol" value="BTCUSDT" style="text-transform: uppercase;">
                     </div>
                   </div>
-                  <div class="field" style="flex: 3; margin-bottom: 0;">
-                    <label>Zeitraum (Tage)</label>
-                    <div class="input-wrap">
-                      <select id="backtest-days" class="backtest-select">
-                        <option value="1">1 Tag (1.440 Kerzen)</option>
-                        <option value="3">3 Tage (4.320 Kerzen)</option>
-                        <option value="7" selected>7 Tage (10.080 Kerzen)</option>
-                        <option value="14">14 Tage (20.160 Kerzen)</option>
-                        <option value="30">30 Tage (43.200 Kerzen)</option>
-                      </select>
-                    </div>
+                </div>
+
+                <div class="field" style="margin-bottom: 8px;">
+                  <label>Enddatum (Anker)</label>
+                  <div style="display: flex; gap: 12px; align-items: center; font-size: 11px; color: var(--text-dim); margin-bottom: 6px;">
+                    <label style="display:flex; align-items:center; gap:4px; cursor:pointer;">
+                      <input type="radio" name="backtest-end-mode" id="backtest-end-mode-live" value="live" checked> Live (jetzt)
+                    </label>
+                    <label style="display:flex; align-items:center; gap:4px; cursor:pointer;">
+                      <input type="radio" name="backtest-end-mode" id="backtest-end-mode-custom" value="custom"> Bestimmtes Datum
+                    </label>
+                  </div>
+                  <div class="input-wrap" id="backtest-end-date-wrap" style="display: none;">
+                    <input type="date" id="backtest-end-date">
                   </div>
                 </div>
-                <button type="button" id="btn-load-backtest-data" class="backtest-btn">Daten laden</button>
+
+                <div class="field" style="margin-bottom: 8px;">
+                  <label>Zeitraum (rückwirkend ab Enddatum)</label>
+                  <div class="input-wrap">
+                    <select id="backtest-days" class="backtest-select">
+                      <option value="1">1 Tag</option>
+                      <option value="3">3 Tage</option>
+                      <option value="7" selected>7 Tage</option>
+                      <option value="14">14 Tage</option>
+                      <option value="30">30 Tage</option>
+                      <option value="60">60 Tage</option>
+                      <option value="90">90 Tage (~3 Monate)</option>
+                      <option value="180">180 Tage (~6 Monate)</option>
+                      <option value="365">365 Tage (1 Jahr)</option>
+                      <option value="730">730 Tage (2 Jahre)</option>
+                      <option value="1095">1095 Tage (3 Jahre)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div id="backtest-estimate" style="font-size: 10px; color: var(--text-dim); margin-bottom: 8px;"></div>
+
+                <div style="display: flex; gap: 6px;">
+                  <button type="button" id="btn-load-backtest-data" class="backtest-btn" style="flex: 1;">Daten laden</button>
+                  <button type="button" id="btn-clear-candle-cache" class="backtest-btn" title="Aktuell geladenen Datensatz aus dem Browser-Cache (IndexedDB) entfernen" style="flex: 0 0 auto; padding: 6px 10px; border: 1px dashed var(--border); background: transparent; color: var(--text-dim);" disabled>Aktiven Cache leeren</button>
+                </div>
                 <div id="backtest-loader-status" style="font-size: 10px; color: var(--text-dim); margin-top: 6px; font-weight: 500;">Keine Kerzen geladen.</div>
                 <!-- Progress bar -->
                 <div id="backtest-progress-container" style="display: none; margin-top: 8px; background: var(--surface-3); border-radius: 4px; overflow: hidden; height: 6px; border: 1px solid var(--border-soft);">
                   <div id="backtest-progress-bar" style="background: var(--teal); width: 0%; height: 100%; transition: width 0.1s ease;"></div>
                 </div>
+
+                <!-- Saved dataset library: lets you keep multiple historical windows (market phases) cached locally -->
+                <div style="margin-top: 10px;">
+                  <div style="font-size: 9px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px;">💾 Gespeicherte Datensätze (Marktphasen)</div>
+                  <div id="backtest-cache-list" style="display: flex; flex-direction: column; gap: 4px;"></div>
+                </div>
               </div>
+
 
               <!-- Sub-section: Single Parameters -->
               <div class="backtest-section" style="margin-top: 12px;">
@@ -440,12 +475,13 @@
                     <strong id="opt-total-progress">-</strong>
                   </div>
                 </div>
+                <div id="opt-validation-info" style="font-size: 9px; color: var(--text-faint); margin-bottom: 12px; line-height: 1.5;"></div>
 
                 <div style="display: flex; gap: 8px; margin-bottom: 8px;">
                   <button type="button" id="btn-start-optimizer" class="backtest-btn secondary" style="flex: 2; margin-top: 0;" disabled>Lernen starten</button>
                   <button type="button" id="btn-stop-optimizer" class="backtest-btn" style="flex: 1; margin-top: 0; background: var(--short); color: white;" disabled>Stopp</button>
                 </div>
-                <button type="button" id="btn-reset-optimizer-db" class="backtest-btn" style="font-size: 9px; padding: 4px; margin-top: 4px; border: 1px dashed var(--border); color: var(--text-dim); background: transparent; width: 100%;">Lernspeicher löschen</button>
+                <button type="button" id="btn-reset-optimizer-db" class="backtest-btn" style="font-size: 9px; padding: 4px; margin-top: 4px; border: 1px dashed var(--border); color: var(--text-dim); background: transparent; width: 100%;" title="Löscht nur die Testergebnisse/Lerndaten — Kerzen-Datensätze bleiben erhalten">Lernspeicher löschen (Kerzen-Cache bleibt erhalten)</button>
               </div>
             </div>
 
@@ -526,6 +562,7 @@
                       <thead style="position: sticky; top: 0; background: var(--surface-2); z-index: 1;">
                         <tr>
                           <th>Score</th>
+                          <th>Robust</th>
                           <th>Hebel</th>
                           <th>CD</th>
                           <th>TP %</th>
@@ -556,6 +593,7 @@
 
                 <!-- Sub-tab content: Wissensstand (Lernspeicher) -->
                 <div class="res-tab-content" id="res-tab-wissensstand" style="display: none;">
+                  <div id="wissen-persistence-status" style="font-size: 10px; font-weight: 600; padding: 6px 8px; background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 4px; margin-top: 4px;">💾 Lernspeicher wird geladen...</div>
                   <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
                     <div style="background: var(--surface-2); border: 1px solid var(--border-soft); padding: 12px; border-radius: 6px; text-align: center;">
                       <div style="font-size: 9px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px;">Datenbank-Einträge</div>
