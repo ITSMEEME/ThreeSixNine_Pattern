@@ -670,7 +670,7 @@ App.UI = {
       return;
     }
 
-    tbody.innerHTML = list.map(item => {
+    tbody.innerHTML = list.map((item, idx) => {
       const returnCls = item.results.totalReturnPercent >= 0 ? 'long' : 'short';
       const scoreColor = item.score >= 80 ? 'var(--long)' : item.score >= 50 ? '#ffb020' : 'var(--short)';
 
@@ -679,25 +679,52 @@ App.UI = {
       if (v.validated) {
         const gap = v.trainScore - v.testScore;
         const oosColor = gap <= 15 ? 'var(--long)' : gap <= 30 ? '#ffb020' : 'var(--short)';
-        badgeParts.push(`<span style="color:${oosColor};" title="Training: ${v.trainScore} · Out-of-Sample-Test: ${v.testScore}">OOS</span>`);
+        badgeParts.push(`<span style="color:${oosColor};" title="Training: ${v.trainScore} · Test: ${v.testScore}">OOS</span>`);
       } else {
-        badgeParts.push(`<span style="color:var(--text-faint);" title="Zeitraum zu kurz für Out-of-Sample-Split">–</span>`);
+        badgeParts.push(`<span style="color:var(--text-faint);">–</span>`);
       }
       if (v.stabilityScore !== null && v.stabilityScore !== undefined) {
         const staColor = v.stabilityScore >= 80 ? 'var(--long)' : v.stabilityScore >= 50 ? '#ffb020' : 'var(--short)';
-        badgeParts.push(`<span style="color:${staColor};" title="Stabilität bei Parameter-Variation: ${v.stabilityScore}">STA</span>`);
+        badgeParts.push(`<span style="color:${staColor};">STA</span>`);
+      }
+      if (v.crossPhaseScore !== null && v.crossPhaseScore !== undefined) {
+        const phzColor = v.crossPhaseScore >= 70 ? 'var(--long)' : v.crossPhaseScore >= 40 ? '#ffb020' : 'var(--short)';
+        badgeParts.push(`<span style="color:${phzColor};">PHZ</span>`);
+      }
+
+      const rowId = `lb-row-${idx}`;
+      const rules = item.params.rules || App.state.rules;
+      const stateLabel = (s) => s === 'bull' ? 'Bull' : s === 'bear' ? 'Bear' : 'Neutral';
+      const longRuleText = (rules.long || []).map(r => `${r.interval} ${stateLabel(r.state)}`).join(' UND ');
+      const shortRuleText = (rules.short || []).map(r => `${r.interval} ${stateLabel(r.state)}`).join(' UND ');
+
+      let validationDetailHtml = '';
+      if (v.validated) {
+        const gap = v.trainScore - v.testScore;
+        const gapColor = gap <= 15 ? 'var(--long)' : gap <= 30 ? '#ffb020' : 'var(--short)';
+        validationDetailHtml += `<div style="color:${gapColor};">Out-of-Sample: Training ${v.trainScore} &middot; Test (unbekannte Daten) ${v.testScore}</div>`;
+      } else {
+        validationDetailHtml += `<div style="color:var(--text-faint);">Kein Out-of-Sample-Test (Zeitraum zu kurz)</div>`;
+      }
+      if (v.stabilityScore !== null && v.stabilityScore !== undefined) {
+        const staColor = v.stabilityScore >= 80 ? 'var(--long)' : v.stabilityScore >= 50 ? '#ffb020' : 'var(--short)';
+        validationDetailHtml += `<div style="color:${staColor};">Stabilität bei Parameter-Variation: ${v.stabilityScore}/100</div>`;
+      } else {
+        validationDetailHtml += `<div style="color:var(--text-faint);">Kein Stabilitäts-Check (Score war unter 65)</div>`;
       }
       if (v.crossPhaseScore !== null && v.crossPhaseScore !== undefined) {
         const phzColor = v.crossPhaseScore >= 70 ? 'var(--long)' : v.crossPhaseScore >= 40 ? '#ffb020' : 'var(--short)';
         const detail = (v.crossPhaseDetails || []).map(p => `${p.label}: ${p.score}`).join(', ');
-        badgeParts.push(`<span style="color:${phzColor};" title="Ø Score in anderen Marktphasen: ${v.crossPhaseScore} (${detail})">PHZ</span>`);
+        validationDetailHtml += `<div style="color:${phzColor};">Cross-Phasen-Check (Ø ${v.crossPhaseScore}/100): ${detail || '–'}</div>`;
+      } else {
+        validationDetailHtml += `<div style="color:var(--text-faint);">Kein Cross-Phasen-Check</div>`;
       }
 
       return `
-        <tr class="clickable" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}" data-rules='${JSON.stringify(item.params.rules || App.state.rules)}'>
+        <tr class="clickable lb-toggle-row" data-target="${rowId}">
           <td style="font-weight: bold; color: ${scoreColor};">${item.score}</td>
           <td style="font-size: 8px; white-space: nowrap; letter-spacing: 0.3px;">${badgeParts.join(' ')}</td>
-          <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(item.params.rules)}</td>
+          <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(rules)} ▾</td>
           <td>${item.params.leverage}x</td>
           <td>${item.params.cooldownMin}m</td>
           <td>${item.params.tpPercent}%</td>
@@ -708,18 +735,46 @@ App.UI = {
           <td class="side short">${item.results.maxDrawdownPercent.toFixed(2)}%</td>
           <td>${item.results.totalTrades}</td>
         </tr>
+        <tr id="${rowId}" class="lb-detail-row" style="display:none;">
+          <td colspan="12" style="background: var(--surface-3); padding: 10px; font-size: 10px; line-height: 1.6;">
+            <div style="font-weight:600; margin-bottom:4px;">Einstiegsregeln (alle Bedingungen müssen gleichzeitig gelten — AND):</div>
+            <div>LONG: <strong>${longRuleText || '–'}</strong></div>
+            <div style="margin-bottom:8px;">SHORT: <strong>${shortRuleText || '–'}</strong></div>
+            <div style="font-weight:600; margin-bottom:4px;">Validierung:</div>
+            ${validationDetailHtml}
+            ${item.veto && item.veto.enabled !== false && item.veto.codes && item.veto.codes.length > 0 ? `<div style="margin-top:6px; color: var(--teal);">🛡 Fine-Tune-Filter gespeichert: ${(item.veto.patterns || []).map(p => p.label).join(', ')}</div>` : ''}
+            <button type="button" class="backtest-btn lb-apply-btn" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}" data-rules='${JSON.stringify(rules)}' style="margin-top:10px; width:100%;">✓ Diese Einstellung übernehmen (Regeln + Parameter)</button>
+            <button type="button" class="backtest-btn lb-analyze-btn" data-idx="${idx}" style="margin-top:6px; width:100%; background:transparent; border:1px dashed var(--border); color:var(--text-dim);">🔍 Verlust-Trades analysieren</button>
+            <div id="lb-analysis-${idx}" style="margin-top:8px;"></div>
+          </td>
+        </tr>
       `;
     }).join('');
 
-    tbody.querySelectorAll('tr').forEach(tr => {
+    tbody.querySelectorAll('.lb-toggle-row').forEach(tr => {
       tr.addEventListener('click', () => {
-        const lev = parseFloat(tr.dataset.lev);
-        const cooldown = parseFloat(tr.dataset.cooldown);
-        const tp = parseFloat(tr.dataset.tp);
-        const sl = parseFloat(tr.dataset.sl);
-        const maxOpen = parseInt(tr.dataset.maxOpen || '1');
+        const detail = document.getElementById(tr.dataset.target);
+        if (detail) detail.style.display = detail.style.display === 'none' ? 'table-row' : 'none';
+      });
+    });
 
-        // Copy to inputs
+    tbody.querySelectorAll('.lb-analyze-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.idx);
+        App.UI.runTradeAnalysisForEntry(list[idx], idx);
+      });
+    });
+
+    tbody.querySelectorAll('.lb-apply-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const lev = parseFloat(btn.dataset.lev);
+        const cooldown = parseFloat(btn.dataset.cooldown);
+        const tp = parseFloat(btn.dataset.tp);
+        const sl = parseFloat(btn.dataset.sl);
+        const maxOpen = parseInt(btn.dataset.maxOpen || '1');
+
         document.getElementById('bot-lev').value = lev;
         document.getElementById('bot-cooldown').value = cooldown;
         document.getElementById('bot-tp-pct').value = tp;
@@ -738,11 +793,9 @@ App.UI = {
         App.state.bot.slPercent = sl;
         App.state.bot.maxOpen = maxOpen;
 
-        // Apply the entry-rule combination this result actually used — the numeric params only
-        // make sense together with the rules they were tested against (e.g. "1m+15m" bull/bear)
         let ruleLabel = '';
         try {
-          const rules = JSON.parse(tr.dataset.rules);
+          const rules = JSON.parse(btn.dataset.rules);
           if (rules && rules.long) {
             App.state.rules = rules;
             App.UI.renderRules();
@@ -751,15 +804,255 @@ App.UI = {
               App.API.connectWs(App.state.timeframe);
             });
           }
-        } catch (e) {
-          console.error('Konnte Regeln des Leaderboard-Eintrags nicht anwenden:', e);
+        } catch (err) {
+          console.error('Konnte Regeln des Leaderboard-Eintrags nicht anwenden:', err);
         }
 
         App.Bot.renderBotUI();
         App.saveToLocalStorage();
-        App.UI.showToast(`Parameter übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}`);
+        App.UI.showToast(`Übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}`);
       });
     });
+  },
+
+  // Re-runs the given leaderboard entry's strategy on the full active dataset and explains
+  // every losing trade (market phase, momentum, possible flash-move/cascade) — the "why did
+  // this fail" report the failed-trade-analysis feature is built around.
+  runTradeAnalysisForEntry(item, idx) {
+    const container = document.getElementById(`lb-analysis-${idx}`);
+    if (!container) return;
+
+    if (!App.state.backtestCandles || App.state.backtestCandles.length === 0) {
+      container.innerHTML = `<div style="color:var(--short);">Keine Kerzendaten geladen — bitte zuerst im Datenlader Kerzen laden.</div>`;
+      return;
+    }
+
+    container.innerHTML = `<div style="color:var(--text-dim);">Analysiere Verlust-Trades...</div>`;
+
+    // Small delay so the "Analysiere..." message actually paints before the (synchronous) backtest runs
+    setTimeout(() => {
+      const startBalanceSats = parseFloat(document.getElementById('backtest-capital')?.value) || App.CONFIG.startBalanceSats;
+      const qtyUsd = parseFloat(document.getElementById('backtest-qty')?.value) || 100;
+
+      const params = {
+        startBalanceSats,
+        qtyUsd,
+        leverage: item.params.leverage,
+        cooldownMin: item.params.cooldownMin,
+        maxOpen: item.params.maxOpen || 1,
+        tpPercent: item.params.tpPercent,
+        slPercent: item.params.slPercent,
+        rules: item.params.rules || App.state.rules,
+        feeRate: App.CONFIG.feeRate,
+        spread: App.CONFIG.spread
+      };
+
+      const res = App.Backtest.runBacktest(App.state.backtestCandles, params);
+      const analysis = App.TradeAnalyzer.analyzeLosses(App.state.backtestCandles, res.tradeLog);
+      const datasetRangeLabel = (item.datasetRange && item.datasetRange.label)
+        || `${App.Backtest.formatDateShort(App.state.backtestCandles[0].time)}–${App.Backtest.formatDateShort(App.state.backtestCandles[App.state.backtestCandles.length - 1].time)}`;
+
+      if (analysis.totalLosses === 0) {
+        container.innerHTML = `<div style="color:var(--long);">Keine Verlust-Trades im aktuell geladenen Zeitraum — nichts zu analysieren.</div>`;
+        return;
+      }
+
+      const summaryHtml = analysis.summary.map(s => `
+        <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+          <span>${s.label}</span>
+          <strong>${s.count}/${analysis.totalLosses} (${s.percent}%)</strong>
+        </div>
+      `).join('');
+
+      container.innerHTML = `
+        <div style="background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 4px; padding: 8px;">
+          <div style="font-weight:600; margin-bottom:6px;">${analysis.totalLosses} von ${analysis.totalTrades} Trades verloren — häufigste Ursachen:</div>
+          ${summaryHtml}
+          <button type="button" class="backtest-btn lb-derive-veto-btn" style="margin-top:8px; width:100%;">⚙ Regelbasierten Fine-Tune-Filter erstellen</button>
+          <button type="button" class="backtest-btn lb-train-ml-btn" style="margin-top:6px; width:100%; border:1px dashed var(--border); background:transparent; color:var(--text-dim);">🧠 ML-Modell trainieren (logistische Regression)</button>
+          <div class="lb-veto-result" style="margin-top:8px;"></div>
+          <div class="lb-ml-result" style="margin-top:8px;"></div>
+        </div>
+      `;
+
+      container.querySelector('.lb-derive-veto-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        App.UI.deriveAndTestVeto(item, params, analysis, container.querySelector('.lb-veto-result'), datasetRangeLabel);
+      });
+
+      container.querySelector('.lb-train-ml-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        App.UI.trainAndTestML(item, params, res, container.querySelector('.lb-ml-result'), datasetRangeLabel);
+      });
+    }, 30);
+  },
+
+  // Turns the recurring loss patterns into a concrete veto filter, re-tests the strategy with
+  // the filter applied (before/after comparison), and offers to push it live to the bot —
+  // this is the actual feedback loop: base model says "buy", fine-tune layer can override it.
+  deriveAndTestVeto(item, params, analysis, resultEl, datasetRangeLabel) {
+    const vetoRules = App.TradeAnalyzer.deriveVetoRules(analysis.summary, analysis.totalLosses);
+
+    // Record this run as a library epoch regardless of outcome — "no significant pattern this
+    // time" is useful data too (it can trigger demotion of a previously confirmed pattern)
+    const ruleFindings = {};
+    analysis.summary.forEach(s => {
+      if (s.code === 'unclear') return;
+      ruleFindings[s.code] = { significant: vetoRules.some(v => v.code === s.code), sharePercent: s.percent, count: s.count };
+    });
+    // Also record codes that didn't show up at all this epoch as "not significant"
+    Object.keys(App.TradeAnalyzer.REASON_LABELS).forEach(code => {
+      if (code !== 'unclear' && !ruleFindings[code]) ruleFindings[code] = { significant: false, sharePercent: 0, count: 0 };
+    });
+    App.TradeAnalyzer.recordEpoch({ type: 'rule', testId: item.testId, datasetRangeLabel, ruleFindings });
+    App.UI.renderMarketLawsLibrary();
+
+    if (vetoRules.length === 0) {
+      resultEl.innerHTML = `<div style="color:var(--text-faint);">Keine ausreichend häufige Verlust-Ursache in dieser Epoche (mind. 5 Fälle und 25% der Verluste nötig) — als Epoche aufgezeichnet, aber kein Filter für diesen Lauf erstellt.</div>`;
+      return;
+    }
+
+    const codes = vetoRules.map(r => r.code);
+    const beforeRes = App.Backtest.runBacktest(App.state.backtestCandles, params);
+    const afterParams = { ...params, veto: { enabled: true, codes } };
+    const afterRes = App.Backtest.runBacktest(App.state.backtestCandles, afterParams);
+
+    const veto = {
+      enabled: true,
+      codes,
+      patterns: vetoRules.map(r => ({ code: r.code, label: r.label, sharePercent: r.percent })),
+      derivedAt: Date.now(),
+      beforeAfter: {
+        beforeWinRate: beforeRes.winRatePercent, afterWinRate: afterRes.winRatePercent,
+        beforeReturn: beforeRes.totalReturnPercent, afterReturn: afterRes.totalReturnPercent,
+        beforeTrades: beforeRes.totalTrades, afterTrades: afterRes.totalTrades,
+        vetoedTrades: afterRes.vetoedTrades
+      }
+    };
+
+    if (item.testId) App.Optimizer.saveVetoProfile(item.testId, veto);
+
+    const wrColor = afterRes.winRatePercent >= beforeRes.winRatePercent ? 'var(--long)' : 'var(--short)';
+    const retColor = afterRes.totalReturnPercent >= beforeRes.totalReturnPercent ? 'var(--long)' : 'var(--short)';
+
+    resultEl.innerHTML = `
+      <div style="font-weight:600; margin-bottom:4px;">Filter dieser Epoche: ${vetoRules.map(r => r.label).join(' · ')}</div>
+      <div>Winrate: ${beforeRes.winRatePercent.toFixed(1)}% → <span style="color:${wrColor};">${afterRes.winRatePercent.toFixed(1)}%</span></div>
+      <div>Rendite: ${beforeRes.totalReturnPercent.toFixed(2)}% → <span style="color:${retColor};">${afterRes.totalReturnPercent.toFixed(2)}%</span></div>
+      <div>Trades: ${beforeRes.totalTrades} → ${afterRes.totalTrades} (${afterRes.vetoedTrades} durch Filter blockiert)</div>
+      <div style="margin-top:6px; color:var(--text-faint);">📚 Als Epoche aufgezeichnet — schau im Tab "Wissensstand" nach, ob dieses Muster über mehrere Epochen hinweg bestätigt wird, bevor du es dauerhaft live nutzt.</div>
+      <button type="button" class="backtest-btn lb-apply-veto-btn" style="margin-top:8px; width:100%; border:1px dashed var(--border); background:transparent; color:var(--text-dim);">⚠ Nur diese Epoche testweise auf Live-Bot anwenden (unbestätigt)</button>
+    `;
+
+    resultEl.querySelector('.lb-apply-veto-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      App.state.bot.veto = { enabled: true, codes, vetoedCount: 0 };
+      App.saveToLocalStorage();
+      App.UI.showToast(`Unbestätigter Test-Filter aktiv: ${vetoRules.map(r => r.label).join(', ')}`);
+    });
+  },
+
+  // Trains a logistic regression on continuous market features (trend/volatility/momentum/
+  // volume) labeled by trade outcome, shows the learned weights in plain language, and compares
+  // before/after performance with the ML filter applied — the "smarter" alternative to the
+  // fixed-threshold rule-based veto above.
+  async trainAndTestML(item, params, res, resultEl, datasetRangeLabel) {
+    resultEl.innerHTML = `<div style="color:var(--text-dim);">Trainiere Modell...</div>`;
+    try {
+      const candles = App.state.backtestCandles;
+      const { trainTrades, testTrades, splitAvailable } = App.TradeAnalyzer.splitTradesForValidation(res.tradeLog);
+
+      const mlModel = await App.TradeAnalyzer.trainLossModel(candles, trainTrades);
+      const threshold = 0.6;
+
+      const weighted = mlModel.featureNames.map((name, i) => ({
+        name,
+        label: App.TradeAnalyzer.ML_FEATURE_LABELS[name],
+        weight: mlModel.weights[i]
+      })).sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight));
+
+      const mlFindings = {};
+      mlModel.featureNames.forEach((name, i) => { mlFindings[name] = { weight: mlModel.weights[i] }; });
+      App.TradeAnalyzer.recordEpoch({ type: 'ml', testId: item.testId, datasetRangeLabel, mlFindings });
+      App.UI.renderMarketLawsLibrary();
+
+      const weightsHtml = weighted.map(w => {
+        const color = Math.abs(w.weight) > 0.3 ? 'var(--short)' : 'var(--text-dim)';
+        return `<div style="display:flex; justify-content:space-between; margin-bottom:3px;"><span>${w.label}</span><strong style="color:${color};">${w.weight >= 0 ? '+' : ''}${w.weight.toFixed(2)}</strong></div>`;
+      }).join('');
+
+      const accText = mlModel.trainingAccuracy !== null ? ` &middot; Trainings-Genauigkeit: ${Math.round(mlModel.trainingAccuracy * 100)}%` : '';
+
+      let oosHtml = '';
+      let beforeRes, afterRes, evalCandles;
+
+      if (splitAvailable) {
+        // Only evaluate on the time window covering the unseen test trades — the model must
+        // never be judged on the period it was trained on
+        const splitTimeSec = Math.floor(testTrades[0].entryTime / 1000);
+        const splitIdx = App.TradeAnalyzer.findCandleIndex(candles, splitTimeSec);
+        evalCandles = candles.slice(splitIdx);
+
+        const oosEval = App.TradeAnalyzer.evaluateOOS(mlModel, candles, testTrades, threshold);
+        const sepColor = oosEval.separation !== null && oosEval.separation > 0.05 ? 'var(--long)' : 'var(--short)';
+        oosHtml = `
+          <div style="margin-top:8px; padding-top:6px; border-top: 1px solid var(--border-soft);">
+            <div style="font-weight:600;">Out-of-Sample-Test (${testTrades.length} unbekannte Trades, nie im Training gesehen):</div>
+            <div>Trefferquote bei Schwelle ${Math.round(threshold * 100)}%: ${Math.round(oosEval.accuracy * 100)}%</div>
+            <div style="color:${sepColor};">Trennschärfe (Ø geschätzte Verlust-Whs. Verlierer − Gewinner): ${oosEval.separation !== null ? (oosEval.separation >= 0 ? '+' : '') + (oosEval.separation * 100).toFixed(1) + ' Punkte' : '–'}</div>
+          </div>
+        `;
+
+        beforeRes = App.Backtest.runBacktest(evalCandles, params);
+        const afterParams = { ...params, mlVeto: { enabled: true, model: mlModel, threshold } };
+        afterRes = App.Backtest.runBacktest(evalCandles, afterParams);
+      } else {
+        oosHtml = `<div style="margin-top:8px; padding-top:6px; border-top: 1px solid var(--border-soft); color: var(--text-faint);">⚠ Zu wenige Trades für einen Out-of-Sample-Split (mind. 30 nötig) — Vergleich unten ist In-Sample, also mit Vorsicht zu genießen.</div>`;
+        evalCandles = candles;
+        beforeRes = res;
+        const afterParams = { ...params, mlVeto: { enabled: true, model: mlModel, threshold } };
+        afterRes = App.Backtest.runBacktest(evalCandles, afterParams);
+      }
+
+      const mlVeto = {
+        enabled: true,
+        model: mlModel,
+        threshold,
+        validated: splitAvailable,
+        beforeAfter: {
+          beforeWinRate: beforeRes.winRatePercent, afterWinRate: afterRes.winRatePercent,
+          beforeReturn: beforeRes.totalReturnPercent, afterReturn: afterRes.totalReturnPercent,
+          beforeTrades: beforeRes.totalTrades, afterTrades: afterRes.totalTrades,
+          mlVetoedTrades: afterRes.mlVetoedTrades
+        }
+      };
+      if (item.testId) App.Optimizer.saveMLVetoProfile(item.testId, mlVeto);
+
+      const wrColor = afterRes.winRatePercent >= beforeRes.winRatePercent ? 'var(--long)' : 'var(--short)';
+      const retColor = afterRes.totalReturnPercent >= beforeRes.totalReturnPercent ? 'var(--long)' : 'var(--short)';
+
+      resultEl.innerHTML = `
+        <div style="font-weight:600; margin-bottom:4px;">Gelernte Gewichte (trainiert auf ${mlModel.trainedOn} Trades, davon ${mlModel.trainedOnLosses} Verluste${accText}):</div>
+        ${weightsHtml}
+        ${oosHtml}
+        <div style="margin-top:8px; font-weight:600;">${splitAvailable ? 'Vorher/Nachher — nur unbekannter Test-Zeitraum:' : 'Vorher/Nachher (In-Sample):'}</div>
+        <div>Winrate: ${beforeRes.winRatePercent.toFixed(1)}% → <span style="color:${wrColor};">${afterRes.winRatePercent.toFixed(1)}%</span></div>
+        <div>Rendite: ${beforeRes.totalReturnPercent.toFixed(2)}% → <span style="color:${retColor};">${afterRes.totalReturnPercent.toFixed(2)}%</span></div>
+        <div>Trades: ${beforeRes.totalTrades} → ${afterRes.totalTrades} (${afterRes.mlVetoedTrades} durch ML-Filter blockiert)</div>
+        <div style="margin-top:6px; color:var(--text-faint);">📚 Als Epoche aufgezeichnet — die einzelnen Merkmalsgewichte werden im Tab "Wissensstand" über mehrere Epochen hinweg auf Konsistenz geprüft.</div>
+        <button type="button" class="backtest-btn lb-apply-ml-btn" style="margin-top:8px; width:100%; border:1px dashed var(--border); background:transparent; color:var(--text-dim);">⚠ Nur dieses Modell testweise auf Live-Bot anwenden (unbestätigt)</button>
+      `;
+
+      resultEl.querySelector('.lb-apply-ml-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        App.state.bot.mlVeto = { enabled: true, model: mlModel, threshold, vetoedCount: 0 };
+        App.saveToLocalStorage();
+        App.UI.showToast(`Unbestätigtes ML-Testmodell aktiv (Schwelle ${Math.round(threshold * 100)}%).`);
+      });
+    } catch (err) {
+      console.error('ML-Training fehlgeschlagen:', err);
+      resultEl.innerHTML = `<div style="color:var(--short);">${err.message || 'ML-Training fehlgeschlagen.'}</div>`;
+    }
   },
 
   renderHeatmaps() {
@@ -884,6 +1177,56 @@ App.UI = {
       } else {
         bestParamsEl.textContent = 'Keine Daten vorhanden. Führe den Optimizer aus.';
       }
+    }
+
+    this.renderMarketLawsLibrary();
+  },
+
+  renderMarketLawsLibrary() {
+    const lib = App.state.mlLibrary;
+    const epochCountEl = document.getElementById('wissen-library-epoch-count');
+    const contentEl = document.getElementById('wissen-library-content');
+    const applyBtn = document.getElementById('btn-apply-library');
+    if (!contentEl) return;
+
+    const epochs = (lib && lib.epochs) || [];
+    if (epochCountEl) epochCountEl.textContent = `${epochs.length} Epoche${epochs.length === 1 ? '' : 'n'}`;
+
+    if (epochs.length === 0) {
+      contentEl.innerHTML = 'Noch keine Epochen aufgezeichnet. Jede Verlust-Trade-Analyse im Leaderboard zählt als eine Epoche.';
+      if (applyBtn) applyBtn.style.display = 'none';
+      return;
+    }
+
+    const statusLabel = (s) => s === 'confirmed' ? '✓ Bestätigt' : s === 'insufficient_data' ? '… zu wenig Daten' : '○ Kandidat';
+    const statusColor = (s) => s === 'confirmed' ? 'var(--long)' : s === 'insufficient_data' ? 'var(--text-faint)' : '#ffb020';
+
+    const ruleRows = Object.entries(lib.rules || {})
+      .filter(([, v]) => v.totalEpochs > 0)
+      .sort((a, b) => b[1].significantCount - a[1].significantCount)
+      .map(([code, v]) => `<div style="display:flex; justify-content:space-between; margin-bottom:2px;"><span>${App.TradeAnalyzer.REASON_LABELS[code] || code}</span><span style="color:${statusColor(v.status)};">${statusLabel(v.status)} (${v.significantCount}/${v.totalEpochs}, ${v.distinctPhases} Phasen)</span></div>`)
+      .join('');
+
+    const mlRows = Object.entries(lib.mlFeatures || {})
+      .filter(([, v]) => v.totalEpochs > 0)
+      .sort((a, b) => b[1].significantCount - a[1].significantCount)
+      .map(([name, v]) => `<div style="display:flex; justify-content:space-between; margin-bottom:2px;"><span>${App.TradeAnalyzer.ML_FEATURE_LABELS[name] || name}</span><span style="color:${statusColor(v.status)};">${statusLabel(v.status)} (${v.significantCount}/${v.totalEpochs}, ${v.distinctPhases} Phasen)</span></div>`)
+      .join('');
+
+    contentEl.innerHTML = `
+      ${ruleRows ? `<div style="color:var(--text-faint); margin-bottom:2px;">Regelbasierte Muster:</div>${ruleRows}` : ''}
+      ${mlRows ? `<div style="color:var(--text-faint); margin: 6px 0 2px;">ML-Merkmale:</div>${mlRows}` : ''}
+    `;
+
+    const confirmedCodes = App.TradeAnalyzer.getConfirmedRuleCodes();
+    if (applyBtn) {
+      applyBtn.style.display = confirmedCodes.length > 0 ? 'block' : 'none';
+      applyBtn.onclick = () => {
+        App.state.bot.veto = { enabled: true, codes: confirmedCodes, vetoedCount: 0 };
+        App.saveToLocalStorage();
+        App.Bot.renderBotUI();
+        App.UI.showToast(`Bestätigte Bibliothek angewendet: ${confirmedCodes.map(c => App.TradeAnalyzer.REASON_LABELS[c]).join(', ')}`);
+      };
     }
   },
 

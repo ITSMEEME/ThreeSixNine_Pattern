@@ -73,6 +73,8 @@ App.Backtest = {
     let maxDrawdown = 0;
     let tradeIdCounter = 1;
     let totalFeesSats = 0;
+    let vetoedCount = 0;
+    let mlVetoedCount = 0;
     
     // Helper functions for intervals
     const getUniqueRuleIntervals = (rules) => {
@@ -256,6 +258,26 @@ App.Backtest = {
       let triggerAction = 'none';
       if (triggerLong && !triggerShort) triggerAction = 'long';
       else if (triggerShort && !triggerLong) triggerAction = 'short';
+
+      // Fine-Tune-Veto-Schicht: blockiert Signale, die historisch identifizierten
+      // Verlust-Mustern ähneln (z.B. Gegentrend, Flash-Move/Liquidationskaskade-Verdacht)
+      if (triggerAction !== 'none' && params.veto && params.veto.enabled && params.veto.codes && params.veto.codes.length > 0) {
+        const vetoCode = App.TradeAnalyzer.shouldVeto(candles1m, i, triggerAction, params.veto.codes);
+        if (vetoCode) {
+          vetoedCount++;
+          triggerAction = 'none';
+        }
+      }
+
+      // ML-Fine-Tune: trainiertes Logistik-Modell schätzt die Verlustwahrscheinlichkeit dieses
+      // Trades anhand kontinuierlicher Marktmerkmale und blockiert ihn, wenn sie zu hoch ist
+      if (triggerAction !== 'none' && params.mlVeto && params.mlVeto.enabled && params.mlVeto.model) {
+        const p = App.TradeAnalyzer.shouldVetoML(params.mlVeto.model, candles1m, i, triggerAction, params.mlVeto.threshold || 0.6);
+        if (p !== null) {
+          mlVetoedCount++;
+          triggerAction = 'none';
+        }
+      }
       
       if (canTrade && triggerAction !== 'none') {
         const side = triggerAction;
@@ -336,6 +358,8 @@ App.Backtest = {
       winRatePercent: winRate,
       totalTrades: totalTrades,
       totalFeesSats: totalFeesSats,
+      vetoedTrades: vetoedCount,
+      mlVetoedTrades: mlVetoedCount,
       tradeLog: tradeLog
     };
   },

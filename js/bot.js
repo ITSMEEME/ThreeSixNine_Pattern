@@ -38,6 +38,69 @@ App.Bot = {
       }
     }
 
+    const vetoStatusEl = document.getElementById('bot-veto-status');
+    if (vetoStatusEl) {
+      const lines = [];
+      if (b.veto && b.veto.enabled && b.veto.codes && b.veto.codes.length > 0) {
+        const labels = b.veto.codes.map(c => App.TradeAnalyzer.REASON_LABELS[c] || c).join(', ');
+        lines.push(`<div>🛡 Regelbasierter Filter aktiv (${labels}) — ${b.veto.vetoedCount || 0} Trade(s) verhindert. <button type="button" id="btn-disable-veto" style="margin-left:6px; font-size:9px; padding:2px 6px; border:1px dashed var(--border); background:transparent; color:var(--text-dim); border-radius:3px; cursor:pointer;">Deaktivieren</button></div>`);
+      }
+      if (b.mlVeto && b.mlVeto.enabled && b.mlVeto.model) {
+        lines.push(`<div style="margin-top:${lines.length ? '4px' : '0'};">🧠 ML-Filter aktiv (Schwelle ${Math.round((b.mlVeto.threshold || 0.6) * 100)}%) — ${b.mlVeto.vetoedCount || 0} Trade(s) verhindert. <button type="button" id="btn-disable-ml-veto" style="margin-left:6px; font-size:9px; padding:2px 6px; border:1px dashed var(--border); background:transparent; color:var(--text-dim); border-radius:3px; cursor:pointer;">Deaktivieren</button></div>`);
+      }
+      if (lines.length > 0) {
+        vetoStatusEl.style.display = 'block';
+        vetoStatusEl.innerHTML = lines.join('');
+        const disableBtn = document.getElementById('btn-disable-veto');
+        if (disableBtn) {
+          disableBtn.addEventListener('click', () => {
+            App.state.bot.veto.enabled = false;
+            App.saveToLocalStorage();
+            App.Bot.renderBotUI();
+            App.UI.showToast('Regelbasierter Fine-Tune-Filter deaktiviert.');
+          });
+        }
+        const disableMlBtn = document.getElementById('btn-disable-ml-veto');
+        if (disableMlBtn) {
+          disableMlBtn.addEventListener('click', () => {
+            App.state.bot.mlVeto.enabled = false;
+            App.saveToLocalStorage();
+            App.Bot.renderBotUI();
+            App.UI.showToast('ML-Fine-Tune-Filter deaktiviert.');
+          });
+        }
+      } else {
+        vetoStatusEl.style.display = 'none';
+      }
+    }
+
+    const driftEl = document.getElementById('bot-drift-status');
+    if (driftEl) {
+      const status = this.getDriftStatus(null);
+      if (!status) {
+        driftEl.style.display = 'none';
+      } else {
+        driftEl.style.display = 'block';
+        const hitPct = Math.round(status.hitRate * 100);
+        const history = b.driftHistory || [];
+        const first = history[0];
+        const trendDiff = first ? Math.round((status.hitRate - first.hitRate) * 100) : null;
+
+        let warning = '';
+        if (status.hitRate < 0.5) {
+          warning = `<div style="margin-top:4px; color: var(--short); font-weight:600;">⚠ Filter liegt aktuell schlechter als Zufall — verhindert mehr Gewinne als Verluste. Erwäge, ihn zu deaktivieren.</div>`;
+        } else if (trendDiff !== null && trendDiff <= -20) {
+          warning = `<div style="margin-top:4px; color: #ffb020; font-weight:600;">⚠ Trefferquote sinkt deutlich (${trendDiff} Punkte seit erster Messung) — möglicher Hinweis auf verändertes Marktverhalten.</div>`;
+        }
+
+        driftEl.innerHTML = `
+          <div>📉 Live-Drift-Überwachung (letzte ${status.sampleSize} verhinderte Trades, virtuell nachverfolgt):</div>
+          <div style="margin-top:2px;">Trefferquote: <strong style="color:${status.hitRate >= 0.5 ? 'var(--long)' : 'var(--short)'};">${hitPct}%</strong> (${status.lossCount} bestätigt vermiedene Verluste, ${status.winCount} verhinderte Gewinne)</div>
+          ${warning}
+        `;
+      }
+    }
+
     const cPreset = document.getElementById('bot-preset-cons');
     const mPreset = document.getElementById('bot-preset-mod');
     const aPreset = document.getElementById('bot-preset-aggr');
@@ -97,9 +160,102 @@ App.Bot = {
     }
   },
 
+  // --- Live-Drift-Überwachung ---
+  //
+  // Ein verhinderter Trade wird nie real eröffnet, wir kennen also nie direkt, ob das Veto
+  // richtig lag. Lösung: ein "Schatten-Trade" — dieselben TP/SL-Level wie ein echter Trade,
+  // aber rein virtuell mitverfolgt. Löst er später den SL aus, hatte das Veto recht (Verlust
+  // verhindert). Löst er den TP aus, hat das Veto einen Gewinn verhindert (Veto war falsch).
+  // Über viele solcher Schatten-Trades ergibt sich eine echte, laufend aktualisierte
+  // Trefferquote des Filters im aktuellen Marktumfeld — statt nur der Bewertung von damals.
+
+  SHADOW_ROLLING_WINDOW: 20,
+
+  createShadowTrade(side, source, detail) {
+    const b = App.state.bot;
+    const entryPrice = App.state.lastPrice;
+    if (!entryPrice) return;
+
+    const marginSats = App.Engine.margin(b.qtyUsd, entryPrice, b.leverage);
+    const tpSats = Math.round(marginSats * (b.tpPercent / 100));
+    const slSats = Math.round(marginSats * (b.slPercent / 100));
+    const tpPrice = App.Engine.getTpPrice(side, b.qtyUsd, entryPrice, b.leverage, tpSats);
+    const slPrice = App.Engine.getSlPrice(side, b.qtyUsd, entryPrice, b.leverage, slSats);
+    if (!tpPrice || !slPrice) return;
+
+    b.shadowTrades.push({
+      id: App.nextId(),
+      createdAt: Date.now(),
+      side, source, detail,
+      entryPrice, tpPrice, slPrice,
+      status: 'pending'
+    });
+    // Bounded history so this doesn't grow forever
+    if (b.shadowTrades.length > 300) b.shadowTrades = b.shadowTrades.slice(-300);
+    App.saveToLocalStorage();
+  },
+
+  resolveShadowTrades() {
+    const b = App.state.bot;
+    if (!b || !b.shadowTrades || b.shadowTrades.length === 0) return;
+    const price = App.state.lastPrice;
+    if (!price) return;
+
+    let resolvedAny = false;
+    const now = Date.now();
+
+    b.shadowTrades.forEach(s => {
+      if (s.status !== 'pending') return;
+      // Kein Zeitlimit — genau wie echte Positionen in dieser Engine bleibt ein Schatten-Trade
+      // offen, bis er TP oder SL erreicht, egal ob das Minuten oder Tage dauert
+      if (s.side === 'long') {
+        if (price >= s.tpPrice) { s.status = 'win'; s.resolvedAt = now; resolvedAny = true; }
+        else if (price <= s.slPrice) { s.status = 'loss'; s.resolvedAt = now; resolvedAny = true; }
+      } else {
+        if (price <= s.tpPrice) { s.status = 'win'; s.resolvedAt = now; resolvedAny = true; }
+        else if (price >= s.slPrice) { s.status = 'loss'; s.resolvedAt = now; resolvedAny = true; }
+      }
+    });
+
+    if (resolvedAny) {
+      this.recordDriftSnapshot();
+      App.saveToLocalStorage();
+      if (App.UI && App.UI.renderMarketLawsLibrary) App.UI.renderMarketLawsLibrary();
+    }
+  },
+
+  // Rolling hit-rate over the most recent resolved (win/loss, not expired) shadow trades —
+  // "hit" here means the veto correctly predicted a loss.
+  getDriftStatus(source) {
+    const b = App.state.bot;
+    if (!b || !b.shadowTrades) return null;
+    const resolved = b.shadowTrades.filter(s => (s.status === 'win' || s.status === 'loss') && (!source || s.source === source));
+    const recent = resolved.slice(-this.SHADOW_ROLLING_WINDOW);
+    if (recent.length === 0) return null;
+    const lossCount = recent.filter(s => s.status === 'loss').length;
+    const winCount = recent.length - lossCount;
+    const hitRate = lossCount / recent.length;
+    return { sampleSize: recent.length, lossCount, winCount, hitRate };
+  },
+
+  recordDriftSnapshot() {
+    const b = App.state.bot;
+    const status = this.getDriftStatus(null);
+    if (!status || status.sampleSize < this.SHADOW_ROLLING_WINDOW) return; // erst ab voller Fenstergröße snapshotten
+    const last = b.driftHistory[b.driftHistory.length - 1];
+    // Nur neuen Snapshot anlegen, wenn sich die Stichprobe seit dem letzten wirklich verändert hat
+    if (last && last.sampleSize === status.sampleSize && last.hitRate === status.hitRate) return;
+    b.driftHistory.push({ timestamp: Date.now(), ...status });
+    if (b.driftHistory.length > 100) b.driftHistory = b.driftHistory.slice(-100);
+  },
+
   runBotLogic() {
     const b = App.state.bot;
-    if (!b || !b.active) return;
+    if (!b) return;
+
+    this.resolveShadowTrades();
+
+    if (!b.active) return;
 
     const checkRules = (rulesList) => {
       if (!rulesList || rulesList.length === 0) return false;
@@ -128,6 +284,35 @@ App.Bot = {
     let triggerAction = 'none';
     if (triggerLong && !triggerShort) triggerAction = 'long';
     else if (triggerShort && !triggerLong) triggerAction = 'short';
+
+    // Fine-Tune-Veto: unser Modell sagt "kaufen/verkaufen", aber wenn die aktuelle Marktlage
+    // einem historisch gelernten Verlust-Muster ähnelt, wird der Trade verhindert
+    if (triggerAction !== 'none' && b.veto && b.veto.enabled && b.veto.codes && b.veto.codes.length > 0) {
+      const liveCandles = App.API.activeCandles['1m'];
+      if (liveCandles && liveCandles.length > 0) {
+        const vetoCode = App.TradeAnalyzer.shouldVeto(liveCandles, liveCandles.length - 1, triggerAction, b.veto.codes);
+        if (vetoCode) {
+          b.veto.vetoedCount = (b.veto.vetoedCount || 0) + 1;
+          App.UI.showToast(`Trade verhindert (Fine-Tune: ${App.TradeAnalyzer.REASON_LABELS[vetoCode]})`);
+          this.createShadowTrade(triggerAction, 'rule', vetoCode);
+          triggerAction = 'none';
+        }
+      }
+    }
+
+    // ML-Fine-Tune: trainiertes Modell schätzt Verlustwahrscheinlichkeit live
+    if (triggerAction !== 'none' && b.mlVeto && b.mlVeto.enabled && b.mlVeto.model) {
+      const liveCandles = App.API.activeCandles['1m'];
+      if (liveCandles && liveCandles.length > 0) {
+        const p = App.TradeAnalyzer.shouldVetoML(b.mlVeto.model, liveCandles, liveCandles.length - 1, triggerAction, b.mlVeto.threshold || 0.6);
+        if (p !== null) {
+          b.mlVeto.vetoedCount = (b.mlVeto.vetoedCount || 0) + 1;
+          App.UI.showToast(`Trade verhindert (ML-Fine-Tune: ${Math.round(p * 100)}% geschätzte Verlustwahrscheinlichkeit)`);
+          this.createShadowTrade(triggerAction, 'ml', `${Math.round(p * 100)}%`);
+          triggerAction = 'none';
+        }
+      }
+    }
 
     if (triggerAction === 'none') return;
 
