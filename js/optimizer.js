@@ -468,5 +468,24 @@ App.Optimizer = {
       db = db.filter(x => x.marketClass && x.marketClass.regime === filterRegime);
     }
     return db.sort((a, b) => b.score - a.score).slice(0, 100);
+  },
+
+  // Attaches a Fine-Tune veto profile (derived from a failed-trade analysis) to a specific
+  // saved strategy, identified by its testId since the raw storage key isn't exposed to the UI.
+  saveVetoProfile(testId, vetoData) {
+    const found = Object.entries(App.state.optimizerDb).find(([, v]) => v.testId === testId);
+    if (!found) return false;
+    App.state.optimizerDb[found[0]].veto = vetoData;
+    App.saveToLocalStorage();
+    return true;
+  },
+
+  // Same, but for the trained ML (logistic regression) loss-prediction model
+  saveMLVetoProfile(testId, mlVetoData) {
+    const found = Object.entries(App.state.optimizerDb).find(([, v]) => v.testId === testId);
+    if (!found) return false;
+    App.state.optimizerDb[found[0]].mlVeto = mlVetoData;
+    App.saveToLocalStorage();
+    return true;
   }
 };

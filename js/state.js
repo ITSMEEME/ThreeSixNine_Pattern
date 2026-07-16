@@ -30,9 +30,18 @@ App.state = {
     tpPercent: 50,
     slPercent: 25,
     lastTradeTime: 0,
-    logs: []
+    logs: [],
+    // Fine-Tune-Filter, aus der Verlust-Trade-Analyse abgeleitet: blockiert Live-Signale,
+    // die historisch gelernten Verlust-Mustern ähneln
+    veto: { enabled: false, codes: [], vetoedCount: 0 },
+    mlVeto: { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
+    shadowTrades: [],
+    driftHistory: []
   },
-  optimizerDb: {}
+  optimizerDb: {},
+  // "Marktgesetze"-Bibliothek: Muster, die über mehrere Trainings-Epochen und Marktphasen hinweg
+  // bestätigt wurden, statt bei jeder einzelnen Analyse sofort übernommen zu werden
+  mlLibrary: { epochs: [], rules: {}, mlFeatures: {} }
 };
 
 // Set initial balance from config once loaded
@@ -137,6 +146,9 @@ App.saveToLocalStorage = () => {
     }));
     // Save optimizer database separately to prevent it from being cleared on simulation reset
     localStorage.setItem('paper-perp-optimizer-db', JSON.stringify(App.state.optimizerDb));
+    // Save the market-laws library separately too — it's cross-strategy learned knowledge,
+    // not simulation state, and shouldn't be wiped on reset either
+    localStorage.setItem('paper-perp-ml-library', JSON.stringify(App.state.mlLibrary));
   } catch (e) {
     console.error('Fehler beim Speichern in localStorage:', e);
   }
@@ -159,6 +171,15 @@ App.loadFromLocalStorage = () => {
       App.state.optimizerDb = JSON.parse(savedOpt);
     } catch(e) {
       console.error('Fehler beim Laden von optimizerDb aus localStorage:', e);
+    }
+  }
+  // Load the market-laws library separately
+  const savedLib = localStorage.getItem('paper-perp-ml-library');
+  if (savedLib) {
+    try {
+      App.state.mlLibrary = JSON.parse(savedLib);
+    } catch(e) {
+      console.error('Fehler beim Laden der Marktgesetze-Bibliothek aus localStorage:', e);
     }
   }
 };
@@ -243,7 +264,11 @@ App.applyLoadedState = (data, silent) => {
       tpPercent: data.bot.tpPercent ?? 50,
       slPercent: data.bot.slPercent ?? 25,
       lastTradeTime: data.bot.lastTradeTime ?? 0,
-      logs: data.bot.logs ?? []
+      logs: data.bot.logs ?? [],
+      veto: data.bot.veto ?? { enabled: false, codes: [], vetoedCount: 0 },
+      mlVeto: data.bot.mlVeto ?? { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
+      shadowTrades: data.bot.shadowTrades ?? [],
+      driftHistory: data.bot.driftHistory ?? []
     };
   }
   
@@ -300,7 +325,11 @@ App.resetState = () => {
     tpPercent: 50,
     slPercent: 25,
     lastTradeTime: 0,
-    logs: []
+    logs: [],
+    veto: { enabled: false, codes: [], vetoedCount: 0 },
+    mlVeto: { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
+    shadowTrades: [],
+    driftHistory: []
   };
   App.state.rules = {
     long: [{ interval: '1m', state: 'bull' }],
