@@ -691,6 +691,10 @@ App.UI = {
         const phzColor = v.crossPhaseScore >= 70 ? 'var(--long)' : v.crossPhaseScore >= 40 ? '#ffb020' : 'var(--short)';
         badgeParts.push(`<span style="color:${phzColor};">PHZ</span>`);
       }
+      // Deflated-Sharpe-Korrektur: Badge zeigt an, dass der Score um Multiple-Testing-Risiko korrigiert ist
+      if (item.rawScore !== undefined && item.rawScore !== item.score) {
+        badgeParts.push(`<span style="color:#9f7aea;" title="Deflated Score (Roh: ${item.rawScore})">DSR</span>`);
+      }
 
       const rowId = `lb-row-${idx}`;
       const rules = item.params.rules || App.state.rules;
@@ -722,7 +726,7 @@ App.UI = {
 
       return `
         <tr class="clickable lb-toggle-row" data-target="${rowId}">
-          <td style="font-weight: bold; color: ${scoreColor};">${item.score}</td>
+          <td style="font-weight: bold; color: ${scoreColor};" title="${item.rawScore !== undefined ? 'Roh-Score: ' + item.rawScore : ''}">${item.score}</td>
           <td style="font-size: 8px; white-space: nowrap; letter-spacing: 0.3px;">${badgeParts.join(' ')}</td>
           <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(rules)} ▾</td>
           <td>${item.params.leverage}x</td>
@@ -741,6 +745,7 @@ App.UI = {
             <div>LONG: <strong>${longRuleText || '–'}</strong></div>
             <div style="margin-bottom:8px;">SHORT: <strong>${shortRuleText || '–'}</strong></div>
             <div style="font-weight:600; margin-bottom:4px;">Validierung:</div>
+            ${item.rawScore !== undefined && item.rawScore !== item.score ? `<div style="color:#9f7aea;">Deflated Score: ${item.score} (Roh-Score: ${item.rawScore}, Korrektur für ${Object.keys(App.state.optimizerDb).length} getestete Kombinationen)</div>` : ''}
             ${validationDetailHtml}
             ${item.veto && item.veto.enabled !== false && item.veto.codes && item.veto.codes.length > 0 ? `<div style="margin-top:6px; color: var(--teal);">🛡 Fine-Tune-Filter gespeichert: ${(item.veto.patterns || []).map(p => p.label).join(', ')}</div>` : ''}
             <button type="button" class="backtest-btn lb-apply-btn" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}" data-rules='${JSON.stringify(rules)}' style="margin-top:10px; width:100%;">✓ Diese Einstellung übernehmen (Regeln + Parameter)</button>
@@ -847,10 +852,11 @@ App.UI = {
         spread: App.CONFIG.spread
       };
 
-      const res = App.Backtest.runBacktest(App.state.backtestCandles, params);
-      const analysis = App.TradeAnalyzer.analyzeLosses(App.state.backtestCandles, res.tradeLog);
+      const candlesUsed = App.state.backtestCandles;
+      const res = App.Backtest.runBacktest(candlesUsed, params);
+      const analysis = App.TradeAnalyzer.analyzeLosses(candlesUsed, res.tradeLog);
       const datasetRangeLabel = (item.datasetRange && item.datasetRange.label)
-        || `${App.Backtest.formatDateShort(App.state.backtestCandles[0].time)}–${App.Backtest.formatDateShort(App.state.backtestCandles[App.state.backtestCandles.length - 1].time)}`;
+        || `${App.Backtest.formatDateShort(candlesUsed[0].time)}–${App.Backtest.formatDateShort(candlesUsed[candlesUsed.length - 1].time)}`;
 
       if (analysis.totalLosses === 0) {
         container.innerHTML = `<div style="color:var(--long);">Keine Verlust-Trades im aktuell geladenen Zeitraum — nichts zu analysieren.</div>`;
@@ -877,12 +883,12 @@ App.UI = {
 
       container.querySelector('.lb-derive-veto-btn').addEventListener('click', (e) => {
         e.stopPropagation();
-        App.UI.deriveAndTestVeto(item, params, analysis, container.querySelector('.lb-veto-result'), datasetRangeLabel);
+        App.UI.deriveAndTestVeto(item, params, analysis, container.querySelector('.lb-veto-result'), datasetRangeLabel, candlesUsed);
       });
 
       container.querySelector('.lb-train-ml-btn').addEventListener('click', (e) => {
         e.stopPropagation();
-        App.UI.trainAndTestML(item, params, res, container.querySelector('.lb-ml-result'), datasetRangeLabel);
+        App.UI.trainAndTestML(item, params, res, container.querySelector('.lb-ml-result'), datasetRangeLabel, candlesUsed);
       });
     }, 30);
   },
@@ -890,8 +896,9 @@ App.UI = {
   // Turns the recurring loss patterns into a concrete veto filter, re-tests the strategy with
   // the filter applied (before/after comparison), and offers to push it live to the bot —
   // this is the actual feedback loop: base model says "buy", fine-tune layer can override it.
-  deriveAndTestVeto(item, params, analysis, resultEl, datasetRangeLabel) {
+  deriveAndTestVeto(item, params, analysis, resultEl, datasetRangeLabel, candlesUsed) {
     const vetoRules = App.TradeAnalyzer.deriveVetoRules(analysis.summary, analysis.totalLosses);
+    const candles = candlesUsed || App.state.backtestCandles;
 
     // Record this run as a library epoch regardless of outcome — "no significant pattern this
     // time" is useful data too (it can trigger demotion of a previously confirmed pattern)
@@ -913,9 +920,9 @@ App.UI = {
     }
 
     const codes = vetoRules.map(r => r.code);
-    const beforeRes = App.Backtest.runBacktest(App.state.backtestCandles, params);
+    const beforeRes = App.Backtest.runBacktest(candles, params);
     const afterParams = { ...params, veto: { enabled: true, codes } };
-    const afterRes = App.Backtest.runBacktest(App.state.backtestCandles, afterParams);
+    const afterRes = App.Backtest.runBacktest(candles, afterParams);
 
     const veto = {
       enabled: true,
@@ -956,10 +963,10 @@ App.UI = {
   // volume) labeled by trade outcome, shows the learned weights in plain language, and compares
   // before/after performance with the ML filter applied — the "smarter" alternative to the
   // fixed-threshold rule-based veto above.
-  async trainAndTestML(item, params, res, resultEl, datasetRangeLabel) {
+  async trainAndTestML(item, params, res, resultEl, datasetRangeLabel, candlesUsed) {
     resultEl.innerHTML = `<div style="color:var(--text-dim);">Trainiere Modell...</div>`;
     try {
-      const candles = App.state.backtestCandles;
+      const candles = candlesUsed || App.state.backtestCandles;
       const { trainTrades, testTrades, splitAvailable } = App.TradeAnalyzer.splitTradesForValidation(res.tradeLog);
 
       const mlModel = await App.TradeAnalyzer.trainLossModel(candles, trainTrades);
@@ -1033,6 +1040,7 @@ App.UI = {
 
       resultEl.innerHTML = `
         <div style="font-weight:600; margin-bottom:4px;">Gelernte Gewichte (trainiert auf ${mlModel.trainedOn} Trades, davon ${mlModel.trainedOnLosses} Verluste${accText}):</div>
+        <div style="font-size:9px; color:#9f7aea; margin-bottom:6px;">⚙ L2-Regularisierung (λ=${mlModel.l2Lambda || 0.01}) · Klassengewichtung: Gewinn ×${mlModel.classWeights ? mlModel.classWeights[0].toFixed(2) : '?'}, Verlust ×${mlModel.classWeights ? mlModel.classWeights[1].toFixed(2) : '?'}</div>
         ${weightsHtml}
         ${oosHtml}
         <div style="margin-top:8px; font-weight:600;">${splitAvailable ? 'Vorher/Nachher — nur unbekannter Test-Zeitraum:' : 'Vorher/Nachher (In-Sample):'}</div>

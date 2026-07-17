@@ -282,8 +282,22 @@ App.Backtest = {
       if (canTrade && triggerAction !== 'none') {
         const side = triggerAction;
         const entryPrice = side === 'long' ? c.close * (1 + params.spread) : c.close * (1 - params.spread);
-        const marginSats = App.Engine.margin(params.qtyUsd, entryPrice, params.leverage);
-        const entryFeeSats = App.Engine.fee(params.qtyUsd, entryPrice, params.feeRate);
+
+        // Kelly-Positionsgröße: wenn ein ML-Modell vorhanden ist, nutze die geschätzte
+        // Gewinnwahrscheinlichkeit (1 − pLoss) um die Positionsgröße zu skalieren.
+        // Starke Signale → größere Position, schwache → kleinere.
+        let tradeQtyUsd = params.qtyUsd;
+        let kellyFactor = 1.0;
+        if (params.mlVeto && params.mlVeto.model) {
+          const pLoss = App.TradeAnalyzer.predictLossProbability(params.mlVeto.model, candles1m, i, side);
+          const pWin = 1 - pLoss;
+          const kelly = App.Engine.kellyAdjustedQty(params.qtyUsd, pWin, params.tpPercent, params.slPercent);
+          tradeQtyUsd = kelly.qty;
+          kellyFactor = kelly.factor;
+        }
+
+        const marginSats = App.Engine.margin(tradeQtyUsd, entryPrice, params.leverage);
+        const entryFeeSats = App.Engine.fee(tradeQtyUsd, entryPrice, params.feeRate);
         
         if (balance >= marginSats + entryFeeSats) {
           balance -= (marginSats + entryFeeSats);
@@ -291,8 +305,8 @@ App.Backtest = {
           const tpSats = Math.round(marginSats * (params.tpPercent / 100));
           const slSats = Math.round(marginSats * (params.slPercent / 100));
           
-          const tpPrice = App.Engine.getTpPrice(side, params.qtyUsd, entryPrice, params.leverage, tpSats);
-          const slPrice = App.Engine.getSlPrice(side, params.qtyUsd, entryPrice, params.leverage, slSats);
+          const tpPrice = App.Engine.getTpPrice(side, tradeQtyUsd, entryPrice, params.leverage, tpSats);
+          const slPrice = App.Engine.getSlPrice(side, tradeQtyUsd, entryPrice, params.leverage, slSats);
           const liqPrice = App.Engine.liqPrice(side, entryPrice, params.leverage);
           
           // Log signal state at entry
@@ -307,7 +321,7 @@ App.Backtest = {
           activeTrades.push({
             id: (tradeIdCounter++).toString(),
             side: side,
-            qtyUsd: params.qtyUsd,
+            qtyUsd: tradeQtyUsd,
             leverage: params.leverage,
             entryPrice: entryPrice,
             marginSats: marginSats,
@@ -316,7 +330,8 @@ App.Backtest = {
             slPrice: slPrice,
             liqPrice: liqPrice,
             entryTime: c.time * 1000,
-            signals: entrySignals
+            signals: entrySignals,
+            kellyFactor: kellyFactor
           });
         }
       }
@@ -868,6 +883,10 @@ App.Backtest = {
       lines.push(searchRulesEnabled
         ? `✓ Regel-Kombinationen werden mitgesucht (${App.Optimizer.RULE_SEARCH_INTERVALS.join('/')}, 1-2 Timeframes)`
         : 'ℹ Regel-Suche deaktiviert — nutzt ausschließlich die aktuell konfigurierten Regeln');
+      const currentTrials = Object.keys(App.state.optimizerDb).length;
+      const currentPenalty = Math.round(App.Optimizer.deflatedScorePenalty(Math.max(1, currentTrials)) * 100);
+      lines.push(`✓ Deflated-Sharpe-Korrektur aktiv (aktuell ${currentPenalty}% Abschlag bei ${currentTrials} Tests, α=${App.Optimizer.DEFLATED_ALPHA})`);
+      lines.push('✓ Kelly-Positionsgröße aktiv bei vorhandenem ML-Modell (Half-Kelly, ×0.25–1.50)');
       validationInfoEl.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
     }
 

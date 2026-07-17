@@ -59,6 +59,48 @@
       </div>
       <div id="chart-container">
         <div id="chart-tooltip" style="position: absolute; display: none; background: rgba(9, 13, 16, 0.95); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: #fff; font-family: monospace; font-size: 11px; pointer-events: none; z-index: 1000; box-shadow: 0 8px 24px rgba(0,0,0,0.6); line-height: 1.5; min-width: 180px;"></div>
+        
+        <!-- Premium glassmorphic bot status overlay card -->
+        <div id="bot-status-card" style="display: none; position: absolute; top: 12px; left: 12px; z-index: 99; width: 220px; padding: 10px; border-radius: 8px; border: 1px solid rgba(0, 224, 184, 0.15); background: rgba(13, 18, 25, 0.85); backdrop-filter: blur(10px); box-shadow: 0 10px 30px rgba(0,0,0,0.5); font-family: var(--sans);">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; border-bottom: 1px solid var(--border-soft); padding-bottom: 6px;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span class="status-dot" style="width: 6px; height: 6px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 8px var(--teal); animation: status-pulse 2s infinite; display: inline-block;"></span>
+              <span style="font-size: 9px; font-weight: 800; color: var(--teal); letter-spacing: 0.8px; text-transform: uppercase;">Bot Aktiv</span>
+            </div>
+            <span style="font-size: 8px; color: var(--text-faint); font-family: var(--mono); font-weight: 600;" id="bot-card-cooldown-timer">CD: BEREIT</span>
+          </div>
+          
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 8px; font-family: var(--mono); font-size: 10px;">
+            <div>
+              <div style="font-size: 7px; color: var(--text-faint); text-transform: uppercase; margin-bottom: 1px; font-family: var(--sans); font-weight: 700; letter-spacing: 0.3px;">Größe</div>
+              <div style="color: var(--text); font-weight: 700;" id="bot-card-qty">—</div>
+            </div>
+            <div>
+              <div style="font-size: 7px; color: var(--text-faint); text-transform: uppercase; margin-bottom: 1px; font-family: var(--sans); font-weight: 700; letter-spacing: 0.3px;">Hebel</div>
+              <div style="color: var(--text); font-weight: 700;" id="bot-card-lev">—</div>
+            </div>
+            <div>
+              <div style="font-size: 7px; color: var(--text-faint); text-transform: uppercase; margin-bottom: 1px; font-family: var(--sans); font-weight: 700; letter-spacing: 0.3px;">Max Open</div>
+              <div style="color: var(--text); font-weight: 700;" id="bot-card-max">—</div>
+            </div>
+            <div>
+              <div style="font-size: 7px; color: var(--text-faint); text-transform: uppercase; margin-bottom: 1px; font-family: var(--sans); font-weight: 700; letter-spacing: 0.3px;">TP</div>
+              <div style="color: var(--long); font-weight: 700;" id="bot-card-tp">—</div>
+            </div>
+            <div>
+              <div style="font-size: 7px; color: var(--text-faint); text-transform: uppercase; margin-bottom: 1px; font-family: var(--sans); font-weight: 700; letter-spacing: 0.3px;">SL</div>
+              <div style="color: var(--short); font-weight: 700;" id="bot-card-sl">—</div>
+            </div>
+            <div>
+              <div style="font-size: 7px; color: var(--text-faint); text-transform: uppercase; margin-bottom: 1px; font-family: var(--sans); font-weight: 700; letter-spacing: 0.3px;">CD Dur.</div>
+              <div style="color: var(--text); font-weight: 700;" id="bot-card-cd-dur">—</div>
+            </div>
+          </div>
+          
+          <div id="bot-card-filters" style="margin-top: 8px; border-top: 1px solid var(--border-soft); padding-top: 6px; display: flex; gap: 4px; flex-wrap: wrap;">
+            <!-- Filter badges populated dynamically -->
+          </div>
+        </div>
       </div>
     </div>
 

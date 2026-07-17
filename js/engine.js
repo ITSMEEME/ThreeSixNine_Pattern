@@ -154,5 +154,43 @@ App.Engine = {
       if (B <= 0) return null;
       return (qtyUsd * (1 - App.CONFIG.feeRate) * App.SATS_PER_BTC) / B;
     }
+  },
+
+  // --- Kelly-Kriterium: konfidenzabhängige Positionsgröße ---
+  //
+  // Klassisches Kelly: f* = p − (1−p)/b
+  // p = geschätzte Gewinnwahrscheinlichkeit
+  // b = Payoff-Ratio (TP/SL — was man gewinnt, wenn man gewinnt, relativ zu dem, was man verliert)
+  //
+  // Half-Kelly (f*/2) ist in der Praxis üblich, weil die volle Kelly-Fraktion sehr aggressiv
+  // ist und auf geschätzten (fehlerbehafteten) Wahrscheinlichkeiten basiert.
+
+  kellyFraction(pWin, payoffRatio) {
+    if (pWin <= 0 || pWin >= 1 || payoffRatio <= 0) return 0;
+    const f = pWin - (1 - pWin) / payoffRatio;
+    return Math.max(0, f);
+  },
+
+  // Skaliert die Basis-Positionsgröße mittels Half-Kelly. Ohne ML-Signal fällt es auf 1.0 zurück.
+  // Ergebnis wird auf [0.25, 1.5] × baseQty geklemmt — nie komplett verzichten, nie zu viel riskieren.
+  kellyAdjustedQty(baseQty, pWin, tpPercent, slPercent) {
+    if (pWin === null || pWin === undefined || tpPercent <= 0 || slPercent <= 0) {
+      return { qty: baseQty, factor: 1.0 };
+    }
+    const payoffRatio = tpPercent / slPercent;
+    const fullKelly = this.kellyFraction(pWin, payoffRatio);
+    const halfKelly = fullKelly / 2;
+
+    // Referenz-Kelly bei angenommener „neutraler" 50% Gewinnrate, so dass der Faktor bei
+    // p=50% ungefähr 1.0 ergibt (kein Bias in der Basisgröße)
+    const refKelly = this.kellyFraction(0.5, payoffRatio) / 2;
+    const factor = refKelly > 0
+      ? Math.max(0.25, Math.min(1.5, halfKelly / refKelly))
+      : (halfKelly > 0 ? 1.0 : 0.25);
+
+    return {
+      qty: Math.round(baseQty * factor * 100) / 100,
+      factor: Math.round(factor * 1000) / 1000
+    };
   }
 };

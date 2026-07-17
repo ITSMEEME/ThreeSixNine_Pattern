@@ -5,6 +5,50 @@ App.Bot = {
     const b = App.state.bot;
     if (!b) return;
 
+    const cardEl = document.getElementById('bot-status-card');
+    if (cardEl) {
+      if (b.active) {
+        cardEl.style.display = 'block';
+        document.getElementById('bot-card-qty').textContent = `$${b.qtyUsd}`;
+        document.getElementById('bot-card-lev').textContent = `${b.leverage}x`;
+        document.getElementById('bot-card-max').textContent = `${b.maxOpen}`;
+        document.getElementById('bot-card-tp').textContent = `+${b.tpPercent}%`;
+        document.getElementById('bot-card-sl').textContent = `-${b.slPercent}%`;
+        document.getElementById('bot-card-cd-dur').textContent = `${b.cooldownMin}m`;
+
+        const filtersContainer = document.getElementById('bot-card-filters');
+        if (filtersContainer) {
+          filtersContainer.innerHTML = '';
+          if (b.mlVeto && b.mlVeto.enabled) {
+            const badge = document.createElement('span');
+            badge.textContent = 'ML-Filter';
+            badge.style.cssText = 'font-size: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.3); background: rgba(167, 139, 250, 0.1); text-transform: uppercase;';
+            filtersContainer.appendChild(badge);
+          }
+          if (b.veto && b.veto.enabled) {
+            const badge = document.createElement('span');
+            badge.textContent = 'Regel-Veto';
+            badge.style.cssText = 'font-size: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: var(--amber); border: 1px solid rgba(255, 176, 32, 0.3); background: rgba(255, 176, 32, 0.1); text-transform: uppercase;';
+            filtersContainer.appendChild(badge);
+          }
+          if (b.mlVeto && b.mlVeto.model) {
+            const badge = document.createElement('span');
+            badge.textContent = 'Kelly Sizing';
+            badge.style.cssText = 'font-size: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: var(--teal); border: 1px solid rgba(0, 224, 184, 0.3); background: rgba(0, 224, 184, 0.1); text-transform: uppercase;';
+            filtersContainer.appendChild(badge);
+          }
+          if (filtersContainer.children.length === 0) {
+            const badge = document.createElement('span');
+            badge.textContent = 'Standard-Modus';
+            badge.style.cssText = 'font-size: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: var(--text-faint); border: 1px solid var(--border-soft); background: rgba(255, 255, 255, 0.02); text-transform: uppercase;';
+            filtersContainer.appendChild(badge);
+          }
+        }
+      } else {
+        cardEl.style.display = 'none';
+      }
+    }
+
     const toggleBtn = document.getElementById('btn-toggle-bot');
     const statusText = document.getElementById('bot-status-text');
     if (toggleBtn && statusText) {
@@ -139,11 +183,16 @@ App.Bot = {
     const b = App.state.bot;
     if (!b) return;
     const timerEl = document.getElementById('bot-cooldown-timer');
+    const cardTimerEl = document.getElementById('bot-card-cooldown-timer');
     if (!timerEl) return;
 
     if (!b.active) {
       timerEl.textContent = 'Bot ist inaktiv.';
       timerEl.style.color = 'var(--text-dim)';
+      if (cardTimerEl) {
+        cardTimerEl.textContent = 'CD: INAKTIV';
+        cardTimerEl.style.color = 'var(--text-faint)';
+      }
       return;
     }
 
@@ -154,9 +203,17 @@ App.Bot = {
       const sec = Math.floor((remainingMs % 60000) / 1000);
       timerEl.textContent = `Abklingzeit aktiv. Nächster Trade in: ${min}m ${sec}s`;
       timerEl.style.color = '#ffb020';
+      if (cardTimerEl) {
+        cardTimerEl.textContent = `CD: ${min}m ${sec}s`;
+        cardTimerEl.style.color = '#ffb020';
+      }
     } else {
       timerEl.textContent = 'Bereit für nächsten Trade.';
       timerEl.style.color = 'var(--long)';
+      if (cardTimerEl) {
+        cardTimerEl.textContent = 'CD: BEREIT';
+        cardTimerEl.style.color = 'var(--long)';
+      }
     }
   },
 
@@ -325,8 +382,24 @@ App.Bot = {
 
     const side = triggerAction;
     const entryPrice = App.Engine.fillPrice(side, 'market', App.state.lastPrice, null);
-    const marginSats = App.Engine.margin(b.qtyUsd, entryPrice, b.leverage);
-    const feeSats = App.Engine.fee(b.qtyUsd, entryPrice, App.CONFIG.feeRate);
+
+    // Kelly-Positionsgröße: skaliert die Positionsgröße basierend auf der ML-geschätzten
+    // Gewinnwahrscheinlichkeit und dem TP/SL-Verhältnis — deckungsgleich mit dem Backtest.
+    let tradeQtyUsd = b.qtyUsd;
+    let kellyFactor = 1.0;
+    if (b.mlVeto && b.mlVeto.model) {
+      const liveCandles = App.API.activeCandles['1m'];
+      if (liveCandles && liveCandles.length > 0) {
+        const pLoss = App.TradeAnalyzer.predictLossProbability(b.mlVeto.model, liveCandles, liveCandles.length - 1, side);
+        const pWin = 1 - pLoss;
+        const kelly = App.Engine.kellyAdjustedQty(b.qtyUsd, pWin, b.tpPercent, b.slPercent);
+        tradeQtyUsd = kelly.qty;
+        kellyFactor = kelly.factor;
+      }
+    }
+
+    const marginSats = App.Engine.margin(tradeQtyUsd, entryPrice, b.leverage);
+    const feeSats = App.Engine.fee(tradeQtyUsd, entryPrice, App.CONFIG.feeRate);
 
     if (marginSats + feeSats > App.state.balanceSats) {
       this.logBot(`⚠ Fehler: Nicht genug Guthaben für Bot-Trade (${Math.round(marginSats + feeSats).toLocaleString()} sats benötigt).`);
@@ -336,8 +409,9 @@ App.Bot = {
     const tpSats = Math.round(marginSats * (b.tpPercent / 100));
     const slSats = Math.round(marginSats * (b.slPercent / 100));
 
-    this.logBot(`🤖 Signal erkannt: ${side.toUpperCase()}...`);
-    const success = App.Engine.openPosition(side, b.qtyUsd, b.leverage, 'market', App.state.lastPrice, null, tpSats, slSats);
+    const kellyInfo = kellyFactor !== 1.0 ? ` (Kelly ×${kellyFactor.toFixed(2)} → ${App.UI.fmtUsd(tradeQtyUsd)})` : '';
+    this.logBot(`🤖 Signal erkannt: ${side.toUpperCase()}${kellyInfo}...`);
+    const success = App.Engine.openPosition(side, tradeQtyUsd, b.leverage, 'market', App.state.lastPrice, null, tpSats, slSats);
     if (success) {
       b.lastTradeTime = now;
       this.logBot(`🤖 ${side.toUpperCase()} eröffnet @ ${App.UI.fmtUsd(entryPrice)} (TP: +${tpSats.toLocaleString()} sats, SL: -${slSats.toLocaleString()} sats).`);

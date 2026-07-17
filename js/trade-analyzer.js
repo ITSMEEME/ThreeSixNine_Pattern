@@ -299,7 +299,8 @@ App.TradeAnalyzer = {
     });
 
     const lossCount = rows.filter(r => r.label === 1).length;
-    if (lossCount < 5 || lossCount > rows.length - 5) {
+    const winCount = rows.length - lossCount;
+    if (lossCount < 5 || winCount < 5) {
       throw new Error('Zu wenig Varianz zwischen Gewinn- und Verlust-Trades für ein Training (brauche beide Klassen mit ausreichend Beispielen).');
     }
 
@@ -316,11 +317,27 @@ App.TradeAnalyzer = {
     const xs = tf.tensor2d(rows.map(r => normalizeRow(r.features)));
     const ys = tf.tensor2d(rows.map(r => [r.label]));
 
+    // Klassengewichtung: gleicht unbalancierte Datensätze aus (z.B. 70% Verluste vs 30% Gewinne).
+    // Die Minoritätsklasse wird proportional hochgewichtet, damit das Modell nicht einfach
+    // „immer Verlust vorhersagen" als einfachsten Weg zum niedrigsten Loss lernt.
+    const total = rows.length;
+    const classWeight = {
+      0: total / (2 * winCount),   // Gewinn-Klasse (Label 0)
+      1: total / (2 * lossCount)   // Verlust-Klasse (Label 1)
+    };
+
     const model = tf.sequential();
-    model.add(tf.layers.dense({ units: 1, inputShape: [this.ML_FEATURE_NAMES.length], activation: 'sigmoid' }));
+    // L2-Regularisierung (kernelRegularizer) bestraft extreme Gewichte und macht das Modell
+    // generalisierungsfähiger — verhindert, dass einzelne Features übermäßig dominieren
+    model.add(tf.layers.dense({
+      units: 1,
+      inputShape: [this.ML_FEATURE_NAMES.length],
+      activation: 'sigmoid',
+      kernelRegularizer: tf.regularizers.l2({ l2: 0.01 })
+    }));
     model.compile({ optimizer: tf.train.adam(0.05), loss: 'binaryCrossentropy', metrics: ['accuracy'] });
 
-    const history = await model.fit(xs, ys, { epochs: 100, verbose: 0 });
+    const history = await model.fit(xs, ys, { epochs: 100, verbose: 0, classWeight });
 
     const weightsTensor = model.getWeights()[0];
     const biasTensor = model.getWeights()[1];
@@ -340,7 +357,11 @@ App.TradeAnalyzer = {
       trainedOn: rows.length,
       trainedOnLosses: lossCount,
       trainingAccuracy: finalAccuracy,
-      trainedAt: Date.now()
+      trainedAt: Date.now(),
+      // Meta-Infos für Transparenz: welche Techniken beim Training angewendet wurden
+      regularization: 'l2',
+      l2Lambda: 0.01,
+      classWeights: classWeight
     };
   },
 
