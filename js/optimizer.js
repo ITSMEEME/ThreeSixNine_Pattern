@@ -76,6 +76,25 @@ App.Optimizer = {
     return Math.max(0, Math.min(100, 100 - Math.max(0, concentration - 0.3) * 140));
   },
 
+  // Deflated-Sharpe-artige Korrektur: je mehr Parameterkombinationen getestet wurden, desto
+  // wahrscheinlicher ist es, dass die beste rein zufällig gut aussieht. Diese Penalty
+  // schrumpft den Score logarithmisch mit der Anzahl Trials, ähnlich der Deflated-Sharpe-
+  // Ratio von Bailey & López de Prado.
+  //
+  // penalty = 1 − 1/(1 + α·ln(N)),  α=0.08
+  // Bei N=1: ~0% Abschlag, N=100: ~27%, N=400: ~38%
+  DEFLATED_ALPHA: 0.08,
+
+  deflatedScorePenalty(totalTrials) {
+    if (totalTrials <= 1) return 0;
+    return 1 - 1 / (1 + this.DEFLATED_ALPHA * Math.log(totalTrials));
+  },
+
+  applyDeflatedScore(rawScore, totalTrials) {
+    const penalty = this.deflatedScorePenalty(totalTrials);
+    return Math.round(rawScore * (1 - penalty) * 10) / 10;
+  },
+
   // Chronological train/test split so validation never "sees the future" (no shuffling).
   // Datasets shorter than ~3.5 days (5000 1m-candles) are too small to split meaningfully.
   splitCandlesForValidation(candles, trainRatio = 0.7) {
@@ -218,7 +237,13 @@ App.Optimizer = {
     let extra = 0;
     if (stability !== null && stability !== undefined) { extra += stability * 0.15; weightBase -= 0.15; }
     if (crossPhase !== null && crossPhase !== undefined) { extra += crossPhase.score * 0.20; weightBase -= 0.20; }
-    const finalScore = Math.round((scores.finalScore * weightBase + extra) * 10) / 10;
+    const rawScore = Math.round((scores.finalScore * weightBase + extra) * 10) / 10;
+
+    // Deflated-Sharpe-artige Korrektur: der Score sinkt logarithmisch mit der Anzahl bisher
+    // getesteter Kombinationen, damit die "beste von 400" nicht allein durch Multiple-Testing-
+    // Zufall so aussieht, als wäre sie deutlich besser als der Rest.
+    const totalTrials = Object.keys(App.state.optimizerDb).length + 1; // +1 weil dieser Test noch nicht drin ist
+    const deflatedScore = this.applyDeflatedScore(rawScore, totalTrials);
 
     // Use the test-segment results as the "headline" numbers shown in the leaderboard when
     // available (more representative of future performance); fall back to train results otherwise
@@ -266,7 +291,8 @@ App.Optimizer = {
         crossPhaseDetails: crossPhase ? crossPhase.phases : null
       },
       marketClass: marketClass,
-      score: finalScore
+      rawScore: rawScore,
+      score: deflatedScore
     };
     App.saveToLocalStorage();
   },
