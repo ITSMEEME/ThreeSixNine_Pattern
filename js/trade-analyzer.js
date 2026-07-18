@@ -29,28 +29,51 @@ App.TradeAnalyzer = {
   },
 
   explainTrade(candles1m, trade) {
-    const idx = this.findCandleIndex(candles1m, Math.floor(trade.entryTime / 1000));
     const direction = trade.side;
     const reasons = [];
+    let regime = { regime: 'sideways', volatility: 'low', avgVolume: 0 };
 
-    // 1. Market regime over the preceding ~4h (240 * 1m candles)
-    const regimeWindow = candles1m.slice(Math.max(0, idx - 240), idx + 1);
-    const regime = App.Optimizer.classifyMarket(regimeWindow);
-    if (regime.regime === 'bearish_trend' && direction === 'long') reasons.push('counter_trend');
-    if (regime.regime === 'bullish_trend' && direction === 'short') reasons.push('counter_trend');
-    if (regime.volatility === 'high') reasons.push('high_volatility');
-    if (regime.regime === 'sideways' && regime.volatility === 'high') reasons.push('choppy_market');
+    if (trade.features) {
+      const f = trade.features;
+      const isBull = f.trendAlignment > 1.5;
+      const isBear = f.trendAlignment < -1.5;
+      const vol = f.volatilityPct > 0.08 ? 'high' : 'low';
+      
+      regime = {
+        regime: isBull ? 'bullish_trend' : (isBear ? 'bearish_trend' : 'sideways'),
+        volatility: vol,
+        avgVolume: 0
+      };
 
-    // 2. Immediate momentum against the trade direction (last 15 candles before entry)
-    const momentumWindow = candles1m.slice(Math.max(0, idx - 15), idx + 1);
-    if (momentumWindow.length >= 2) {
-      const priceChange = (momentumWindow[momentumWindow.length - 1].close - momentumWindow[0].open) / momentumWindow[0].open;
-      if (direction === 'long' && priceChange < -0.005) reasons.push('against_momentum');
-      if (direction === 'short' && priceChange > 0.005) reasons.push('against_momentum');
+      if (isBear && direction === 'long') reasons.push('counter_trend');
+      if (isBull && direction === 'short') reasons.push('counter_trend');
+      if (vol === 'high') reasons.push('high_volatility');
+      if (!isBull && !isBear && vol === 'high') reasons.push('choppy_market');
+
+      if (f.momentumAlignment < -0.5) reasons.push('against_momentum');
+      if (f.volumeSpikeRatio > 3 && f.cascadeMovePct > 0.8) reasons.push('liquidation_cascade');
+    } else if (candles1m) {
+      const idx = this.findCandleIndex(candles1m, Math.floor(trade.entryTime / 1000));
+
+      // 1. Market regime over the preceding ~4h (240 * 1m candles)
+      const regimeWindow = candles1m.slice(Math.max(0, idx - 240), idx + 1);
+      regime = App.Optimizer.classifyMarket(regimeWindow);
+      if (regime.regime === 'bearish_trend' && direction === 'long') reasons.push('counter_trend');
+      if (regime.regime === 'bullish_trend' && direction === 'short') reasons.push('counter_trend');
+      if (regime.volatility === 'high') reasons.push('high_volatility');
+      if (regime.regime === 'sideways' && regime.volatility === 'high') reasons.push('choppy_market');
+
+      // 2. Immediate momentum against the trade direction (last 15 candles before entry)
+      const momentumWindow = candles1m.slice(Math.max(0, idx - 15), idx + 1);
+      if (momentumWindow.length >= 2) {
+        const priceChange = (momentumWindow[momentumWindow.length - 1].close - momentumWindow[0].open) / momentumWindow[0].open;
+        if (direction === 'long' && priceChange < -0.005) reasons.push('against_momentum');
+        if (direction === 'short' && priceChange > 0.005) reasons.push('against_momentum');
+      }
+
+      // 3. Volume-spike + abnormal move proxy for a flash-move / liquidation cascade
+      if (this.detectCascade(candles1m, idx)) reasons.push('liquidation_cascade');
     }
-
-    // 3. Volume-spike + abnormal move proxy for a flash-move / liquidation cascade
-    if (this.detectCascade(candles1m, idx)) reasons.push('liquidation_cascade');
 
     if (reasons.length === 0) reasons.push('unclear');
 
@@ -265,8 +288,8 @@ App.TradeAnalyzer = {
     if (!testTrades || testTrades.length === 0) return null;
 
     const predictions = testTrades.map(t => {
-      const idx = this.findCandleIndex(candles1m, Math.floor(t.entryTime / 1000));
-      const p = this.predictLossProbability(mlModel, candles1m, idx, t.side);
+      const idx = candles1m ? this.findCandleIndex(candles1m, Math.floor(t.entryTime / 1000)) : 0;
+      const p = this.predictLossProbability(mlModel, candles1m, idx, t.side, t.features);
       return { p, actualLoss: t.pnlSats < 0 };
     });
 
@@ -293,8 +316,14 @@ App.TradeAnalyzer = {
     }
 
     const rows = tradeLog.map(t => {
-      const idx = this.findCandleIndex(candles1m, Math.floor(t.entryTime / 1000));
-      const f = this.extractFeatures(candles1m, idx, t.side);
+      let f = t.features;
+      if (!f && candles1m) {
+        const idx = this.findCandleIndex(candles1m, Math.floor(t.entryTime / 1000));
+        f = this.extractFeatures(candles1m, idx, t.side);
+      }
+      if (!f) {
+        throw new Error('Keine Features für den Trade vorhanden und keine Kerzendaten übergeben.');
+      }
       return { features: this.ML_FEATURE_NAMES.map(n => f[n]), label: t.pnlSats < 0 ? 1 : 0 };
     });
 
@@ -367,8 +396,8 @@ App.TradeAnalyzer = {
 
   // Pure-JS inference (dot product + sigmoid) — no TF.js dependency needed at prediction time,
   // so real-time/live checks stay lightweight and don't need tensor cleanup.
-  predictLossProbability(mlModel, candles1m, idx, direction) {
-    const f = this.extractFeatures(candles1m, idx, direction);
+  predictLossProbability(mlModel, candles1m, idx, direction, preCalculatedFeatures = null) {
+    const f = preCalculatedFeatures || this.extractFeatures(candles1m, idx, direction);
     const raw = mlModel.featureNames.map(n => f[n]);
     const normalized = raw.map((v, i) => (v - mlModel.normalization[i].mean) / mlModel.normalization[i].std);
     let z = mlModel.bias;
@@ -392,8 +421,33 @@ App.TradeAnalyzer = {
 
   // Real-time / backtest-time check: does the current candle context match one of the active
   // learned veto patterns for a potential trade in this direction? Returns the matching code, or null.
-  shouldVeto(candles1m, idx, direction, activeVetoCodes) {
+  shouldVeto(candles1m, idx, direction, activeVetoCodes, preCalculatedFeatures = null) {
     if (!activeVetoCodes || activeVetoCodes.length === 0) return null;
+
+    if (preCalculatedFeatures) {
+      const f = preCalculatedFeatures;
+      const isBull = f.trendAlignment > 1.5;
+      const isBear = f.trendAlignment < -1.5;
+      const vol = f.volatilityPct > 0.08 ? 'high' : 'low';
+      const regimeStr = isBull ? 'bullish_trend' : (isBear ? 'bearish_trend' : 'sideways');
+
+      if (activeVetoCodes.includes('counter_trend')) {
+        if (regimeStr === 'bearish_trend' && direction === 'long') return 'counter_trend';
+        if (regimeStr === 'bullish_trend' && direction === 'short') return 'counter_trend';
+      }
+      if (activeVetoCodes.includes('high_volatility') && vol === 'high') return 'high_volatility';
+      if (activeVetoCodes.includes('choppy_market') && regimeStr === 'sideways' && vol === 'high') return 'choppy_market';
+
+      if (activeVetoCodes.includes('against_momentum')) {
+        if (f.momentumAlignment < -0.5) return 'against_momentum';
+      }
+
+      if (activeVetoCodes.includes('liquidation_cascade')) {
+        if (f.volumeSpikeRatio > 3 && f.cascadeMovePct > 0.8) return 'liquidation_cascade';
+      }
+
+      return null;
+    }
 
     const needsRegime = activeVetoCodes.some(c => ['counter_trend', 'high_volatility', 'choppy_market'].includes(c));
     let regime = null;

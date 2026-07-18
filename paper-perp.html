@@ -100,6 +100,15 @@
           <div id="bot-card-filters" style="margin-top: 8px; border-top: 1px solid var(--border-soft); padding-top: 6px; display: flex; gap: 4px; flex-wrap: wrap;">
             <!-- Filter badges populated dynamically -->
           </div>
+          
+          <!-- Collapsible strategy detail section -->
+          <div id="bot-card-detail-toggle" style="margin-top: 6px; cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none;" title="Strategie-Details ein-/ausklappen">
+            <span id="bot-card-detail-arrow" style="font-size: 8px; color: var(--text-faint); transition: transform 0.2s;">▸</span>
+            <span id="bot-card-detail-source" style="font-size: 7.5px; color: var(--text-faint); font-family: var(--sans); font-weight: 600; letter-spacing: 0.3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">📋 Manuell</span>
+          </div>
+          <div id="bot-card-detail-content" style="display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-soft); font-size: 9px; line-height: 1.5; color: var(--text-dim); font-family: var(--sans);">
+            <!-- Populated dynamically by bot.js renderBotUI -->
+          </div>
         </div>
       </div>
     </div>
@@ -247,6 +256,12 @@
 
           <div id="bot-veto-status" style="display:none; font-size: 10px; padding: 6px 8px; background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 4px; margin-bottom: 12px;"></div>
 
+          <!-- Active filter detail block for Live Bot -->
+          <div id="bot-active-filters-info" style="display:none; margin-bottom:12px; padding:10px; border-radius:6px; border:1px solid var(--border-soft); background:var(--surface-3); font-size:10px;">
+            <div style="font-size:9px; text-transform:uppercase; font-weight:700; color:var(--text-faint); margin-bottom:8px; letter-spacing:0.5px;">⚡ Aktive Filter (Live Bot)</div>
+            <div id="bot-active-filters-content"></div>
+          </div>
+
           <div id="bot-drift-status" style="display:none; font-size: 10px; padding: 6px 8px; background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 4px; margin-bottom: 12px;"></div>
 
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">
@@ -273,6 +288,23 @@
               <div class="input-wrap">
                 <input type="number" id="bot-lev" min="1" max="100" step="1">
               </div>
+          </div>
+
+          <!-- Martingale-Einstellungen -->
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-soft);">
+            <label style="display: flex; align-items: center; gap: 6px; font-size: 10px; cursor: pointer; font-weight: 600; margin-bottom: 0; user-select: none;">
+              <input type="checkbox" id="bot-martingale-enabled" style="margin: 0; cursor: pointer;">
+              <span>Martingale-Modus (Recovery-Sizing nach SL)</span>
+            </label>
+            <div id="bot-martingale-limit-wrap" style="display: none; align-items: center; gap: 4px;">
+              <span style="font-size: 9px; color: var(--text-dim);">Max. Schritte:</span>
+              <select id="bot-martingale-limit" style="background: var(--surface); border: 1px solid var(--border); border-radius: 3px; color: var(--text); font-size: 9px; padding: 2px 4px; outline: none; cursor: pointer;">
+                <option value="4">4</option>
+                <option value="8" selected>8</option>
+                <option value="16">16</option>
+                <option value="32">32</option>
+                <option value="64">64</option>
+              </select>
             </div>
           </div>
 
@@ -342,12 +374,12 @@
       </div>
 
       <div class="tabs-container-wrap" id="tabs-container-wrap">
-        <div class="tabs">
-          <button class="tab active" data-tab="positions">Positionen <span class="count" id="cnt-pos"></span></button>
-          <button class="tab" data-tab="orders">Orders <span class="count" id="cnt-ord"></span></button>
-          <button class="tab" data-tab="history">Historie</button>
-          <button class="tab" data-tab="backtest">Backtesting</button>
-          <button type="button" id="btn-maximize-list" title="Vergrößern / Verkleinern" style="margin-left: auto; background:transparent; border:none; color:var(--text-dim); cursor:pointer; font-size:16px; padding:0 8px; display:flex; align-items:center; outline:none; transition:color 0.15s ease;">⤢</button>
+        <div class="tabs" title="Doppelklick zum Vergrößern/Verkleinern der Ansicht">
+          <button class="tab active" data-tab="positions" title="Positionen (Doppelklick zum Maximieren/Verkleinern)">Positionen <span class="count" id="cnt-pos"></span></button>
+          <button class="tab" data-tab="orders" title="Orders (Doppelklick zum Maximieren/Verkleinern)">Orders <span class="count" id="cnt-ord"></span></button>
+          <button class="tab" data-tab="history" title="Historie (Doppelklick zum Maximieren/Verkleinern)">Historie</button>
+          <button class="tab" data-tab="backtest" title="Backtesting (Doppelklick zum Maximieren/Verkleinern)">Backtesting</button>
+          <button type="button" id="btn-maximize-list" title="Vergrößern / Verkleinern (oder Doppelklick auf Tab-Leiste)" style="margin-left: auto; background:transparent; border:none; color:var(--text-dim); cursor:pointer; font-size:16px; padding:0 8px; display:flex; align-items:center; outline:none; transition:color 0.15s ease;">⤢</button>
         </div>
         <div class="list-wrap" id="tab-positions"></div>
         <div class="list-wrap" id="tab-orders" style="display:none;"></div>
@@ -469,6 +501,25 @@
                     </div>
                   </div>
                 </div>
+
+                <!-- Martingale-Einstellungen für Backtest -->
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-soft);">
+                  <label style="display: flex; align-items: center; gap: 6px; font-size: 10px; cursor: pointer; font-weight: 600; margin-bottom: 0; user-select: none;">
+                    <input type="checkbox" id="backtest-martingale-enabled" style="margin: 0; cursor: pointer;">
+                    <span>Martingale-Modus (Recovery-Sizing nach SL)</span>
+                  </label>
+                  <div id="backtest-martingale-limit-wrap" style="display: none; align-items: center; gap: 4px;">
+                    <span style="font-size: 9px; color: var(--text-dim);">Max. Schritte:</span>
+                    <select id="backtest-martingale-limit" style="background: var(--surface); border: 1px solid var(--border); border-radius: 3px; color: var(--text); font-size: 9px; padding: 2px 4px; outline: none; cursor: pointer;">
+                      <option value="4">4</option>
+                      <option value="8" selected>8</option>
+                      <option value="16">16</option>
+                      <option value="32">32</option>
+                      <option value="64">64</option>
+                    </select>
+                  </div>
+                </div>
+
                 <!-- Strategy Rules Editor -->
                 <div class="rules-container" style="margin-top: 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--surface);">
                   <div class="rules-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px solid var(--border-soft); padding-bottom: 4px;">
@@ -496,6 +547,12 @@
                   </div>
                 </div>
                 <button type="button" id="btn-run-backtest" class="backtest-btn secondary" disabled>Backtest ausführen</button>
+
+                <!-- Active filter info: shows which Veto / ML filters will be applied in this backtest -->
+                <div id="backtest-active-filters-info" style="display:none; margin-top:10px; padding:10px; border-radius:6px; border:1px solid var(--border-soft); background:var(--surface-3); font-size:10px;">
+                  <div style="font-size:9px; text-transform:uppercase; font-weight:700; color:var(--text-faint); margin-bottom:8px; letter-spacing:0.5px;">⚡ Aktive Filter im Backtest</div>
+                  <div id="backtest-active-filters-content"></div>
+                </div>
               </div>
 
               <!-- Sub-section: Grid Search -->
@@ -503,6 +560,12 @@
               <div class="backtest-section" style="margin-top: 12px;">
                 <div class="backtest-sec-title">3. Selbstlernender Optimizer</div>
                 
+                <!-- Multi-Dataset selection for Optimizer -->
+                <div style="font-size: 9px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px;">📂 Für Optimierung genutzte Datensätze</div>
+                <div id="optimizer-datasets-selection" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; max-height: 120px; overflow-y: auto; padding-right: 4px;">
+                  <!-- Dynamically populated from IndexedDB cache list -->
+                </div>
+
                 <div style="background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 4px; padding: 10px; margin-bottom: 12px; font-family: monospace; font-size: 11px;">
                   <div style="margin-bottom: 6px; display: flex; justify-content: space-between;">
                     <span>Status:</span>
@@ -523,9 +586,14 @@
                 </div>
                 <div id="opt-validation-info" style="font-size: 9px; color: var(--text-faint); margin-bottom: 12px; line-height: 1.5;"></div>
 
-                <label style="display:flex; align-items:center; gap:6px; font-size: 10px; color: var(--text-dim); margin-bottom: 10px; cursor: pointer;">
+                <label style="display:flex; align-items:center; gap:6px; font-size: 10px; color: var(--text-dim); margin-bottom: 6px; cursor: pointer;">
                   <input type="checkbox" id="opt-search-rules" checked>
-                  Regel-Kombinationen mit durchsuchen (Timeframes 1m/5m/15m/1h/4h, statt nur die aktuell konfigurierten Regeln)
+                  Regel-Kombinationen mit durchsuchen (Timeframes 1m/5m/15m/1h/4h)
+                </label>
+
+                <label style="display:flex; align-items:center; gap:6px; font-size: 10px; color: var(--text-dim); margin-bottom: 10px; cursor: pointer;">
+                  <input type="checkbox" id="opt-auto-ml" checked>
+                  Automatisches ML-Veto-Training für Top-Kandidaten (Score >= 60)
                 </label>
 
                 <div style="display: flex; gap: 8px; margin-bottom: 8px;">
@@ -540,6 +608,8 @@
             <div class="backtest-results-col">
               <div id="backtest-no-results" class="empty-state" style="padding: 60px 16px; border: 1px dashed var(--border); border-radius: 6px; text-align: center; color: var(--text-faint); font-size: 11px;">
                 Lade Daten und führe einen Backtest aus, um Ergebnisse anzuzeigen.
+                <br>
+                <span style="display:inline-block; margin-top:8px; color:var(--teal); opacity:0.8; font-size:10px;">💡 Tipp: Doppelklick auf einen Tab oder freien Hintergrund zum Maximieren</span>
               </div>
               
               <div id="backtest-results-content" style="display: none;">
@@ -584,6 +654,8 @@
                       <thead style="position: sticky; top: 0; background: var(--surface-2); z-index: 1;">
                         <tr>
                           <th>Typ</th>
+                          <th>Größe</th>
+                          <th>Schritt</th>
                           <th>Einstieg → Ausstieg</th>
                           <th>Kurs-Spanne</th>
                           <th>Netto PnL</th>
@@ -600,13 +672,22 @@
                 <!-- Sub-tab content: Leaderboard -->
                 <div class="res-tab-content" id="res-tab-leaderboard" style="display: none;">
                   <div style="margin-top: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-size: 10px; color: var(--text-dim);">Marktphase filtern:</span>
-                    <select id="leaderboard-filter" class="backtest-select-small" style="width: auto; padding: 2px 6px;">
-                      <option value="all">Alle Phasen</option>
-                      <option value="bullish_trend">Trend Bullish</option>
-                      <option value="bearish_trend">Trend Bearish</option>
-                      <option value="sideways">Seitwärtsphase</option>
-                    </select>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span style="font-size: 10px; color: var(--text-dim);">Ansicht:</span>
+                      <select id="leaderboard-view-mode" class="backtest-select-small" style="width: auto; padding: 2px 6px;">
+                        <option value="profiles" selected>Top 10 Profile (Regeln + ML)</option>
+                        <option value="raw">Alle Kandidaten (Top 100)</option>
+                      </select>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span style="font-size: 10px; color: var(--text-dim);">Marktphase filtern:</span>
+                      <select id="leaderboard-filter" class="backtest-select-small" style="width: auto; padding: 2px 6px;">
+                        <option value="all">Alle Phasen</option>
+                        <option value="bullish_trend">Trend Bullish</option>
+                        <option value="bearish_trend">Trend Bearish</option>
+                        <option value="sideways">Seitwärtsphase</option>
+                      </select>
+                    </div>
                   </div>
                   <div style="overflow-x: auto; max-height: 400px; border: 1px solid var(--border); border-radius: 4px;">
                     <table class="backtest-table" id="table-optimizer-leaderboard">

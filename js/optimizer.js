@@ -141,22 +141,58 @@ App.Optimizer = {
   // Kept deliberately bounded (not the full UI list up to 1d) so the search space stays tractable.
   RULE_SEARCH_INTERVALS: ['1m', '5m', '15m', '1h', '4h'],
 
-  // All single- and dual-interval rule combinations, mirrored (same intervals bullish for long /
-  // bearish for short). E.g. ['1m','15m'] -> long needs 1m+15m bull, short needs 1m+15m bear.
+  // Generates all single- and dual-interval rule candidates, including CONTRA patterns where
+  // Long and Short use opposing states across timeframes.
+  //
+  // Single intervals: both trend-following (bull long / bear short) and contra (bear long / bull short)
+  //
+  // Dual intervals: all 4 state permutations (bull+bull, bull+bear, bear+bull, bear+bear) for the
+  // Long side, with the Short side always being the exact state mirror (bull↔bear).
+  // This covers patterns like:
+  //   Trend:    Long 1m Bull + 4h Bull  /  Short 1m Bear + 4h Bear
+  //   Contra-1: Long 1m Bull + 4h Bear  /  Short 1m Bear + 4h Bull  (short-TF momentum vs long-TF reversal)
+  //   Contra-2: Long 1m Bear + 4h Bull  /  Short 1m Bull + 4h Bear  (mean-reversion with trend confirmation)
+  //   Reverse:  Long 1m Bear + 4h Bear  /  Short 1m Bull + 4h Bull  (pure counter-trend)
   generateRuleSetCandidates() {
     const intervals = this.RULE_SEARCH_INTERVALS;
-    const combos = [];
-    intervals.forEach(iv => combos.push([iv]));
+    const mirror = (s) => s === 'bull' ? 'bear' : 'bull';
+    const candidates = [];
+
+    // ── Single-interval combinations ──
+    intervals.forEach(iv => {
+      // Trend-following: long when bull, short when bear
+      candidates.push({
+        long:  [{ interval: iv, state: 'bull' }],
+        short: [{ interval: iv, state: 'bear' }],
+        label: iv
+      });
+      // Contra / mean-reversion: long when bear, short when bull
+      candidates.push({
+        long:  [{ interval: iv, state: 'bear' }],
+        short: [{ interval: iv, state: 'bull' }],
+        label: iv + '-contra'
+      });
+    });
+
+    // ── Dual-interval combinations: all 4 state permutations ──
+    const states = ['bull', 'bear'];
     for (let i = 0; i < intervals.length; i++) {
       for (let j = i + 1; j < intervals.length; j++) {
-        combos.push([intervals[i], intervals[j]]);
+        const tf1 = intervals[i];
+        const tf2 = intervals[j];
+        for (const s1 of states) {
+          for (const s2 of states) {
+            candidates.push({
+              long:  [{ interval: tf1, state: s1 },        { interval: tf2, state: s2 }],
+              short: [{ interval: tf1, state: mirror(s1) }, { interval: tf2, state: mirror(s2) }],
+              label: `${tf1}(${s1[0].toUpperCase()})+${tf2}(${s2[0].toUpperCase()})`
+            });
+          }
+        }
       }
     }
-    return combos.map(ivs => ({
-      long: ivs.map(iv => ({ interval: iv, state: 'bull' })),
-      short: ivs.map(iv => ({ interval: iv, state: 'bear' })),
-      label: ivs.join('+')
-    }));
+
+    return candidates;
   },
 
   getRulesSignature(rules) {
@@ -164,9 +200,11 @@ App.Optimizer = {
     return JSON.stringify(rules.long || []) + '|' + JSON.stringify(rules.short || []);
   },
 
+  // Shows interval + state initial (B=bull, b=bear) so contra patterns are clearly visible
+  // e.g. "1m(B)+4h(b)" instead of just "1m+4h" which was ambiguous
   getRuleLabel(rules) {
     if (!rules || !rules.long || rules.long.length === 0) return '–';
-    return rules.long.map(r => r.interval).join('+');
+    return rules.long.map(r => `${r.interval}(${r.state === 'bull' ? 'B' : r.state === 'bear' ? 'b' : 'n'})`).join('+');
   },
 
   // Random rule set for exploration. Always gives the user's own manually configured rules a
@@ -219,15 +257,23 @@ App.Optimizer = {
     const entries = Object.keys(App.state.optimizerDb);
     if (entries.length > 400) {
       // Sort and keep top 200 strategies, delete rest to prevent localStorage overflow
+      // Using the dynamic deflated score for sorting during compaction.
+      const totalTrials = entries.length;
       const sorted = Object.entries(App.state.optimizerDb)
-        .sort((a, b) => b[1].score - a[1].score);
+        .sort((a, b) => {
+          const scoreA = this.applyDeflatedScore(a[1].rawScore !== undefined ? a[1].rawScore : a[1].score, totalTrials);
+          const scoreB = this.applyDeflatedScore(b[1].rawScore !== undefined ? b[1].rawScore : b[1].score, totalTrials);
+          return scoreB - scoreA;
+        });
       App.state.optimizerDb = {};
       sorted.slice(0, 200).forEach(([k, v]) => {
+        // Also update the static score on compaction to match the new database size (200)
+        v.score = this.applyDeflatedScore(v.rawScore !== undefined ? v.rawScore : v.score, 200);
         App.state.optimizerDb[k] = v;
       });
     }
 
-    const { trainRes, testRes, scores, stability, crossPhase } = evalBundle;
+    const { trainRes, testRes, scores, stability, crossPhase, veto, mlVeto, postMlScore } = evalBundle;
 
     // Combine the base (train/test-validated) score with the optional robustness checks.
     // Each optional component takes over part of the weight only when it was actually computed,
@@ -254,6 +300,9 @@ App.Optimizer = {
       timestamp: Date.now(),
       market: symbol.toUpperCase(),
       timeframe: timeframe,
+      veto: veto || null,
+      mlVeto: mlVeto || null,
+      postMlScore: postMlScore || null,
       // Which historical window (market phase) this test ran against, so the leaderboard
       // and future multi-phase training can distinguish "works in 2022 bear market" from
       // "works in the last 7 days"
@@ -325,7 +374,7 @@ App.Optimizer = {
   },
 
   analyzeParameters() {
-    const db = Object.values(App.state.optimizerDb);
+    const db = this.getDbWithDynamicScores();
     if (db.length === 0) {
       return {
         weights: { leverage: 20, cooldownMin: 20, tpPercent: 20, slPercent: 20, maxOpen: 20 },
@@ -373,7 +422,7 @@ App.Optimizer = {
   },
 
   getClusterBounds(rulesSignature) {
-    const db = Object.values(App.state.optimizerDb);
+    const db = this.getDbWithDynamicScores();
     let goodRuns = db.filter(x => x.score >= 70);
 
     // Prefer clustering only within the same rule combination — mixing e.g. "1m" and "1m+4h"
@@ -453,7 +502,7 @@ App.Optimizer = {
   },
 
   getWissensstand() {
-    const db = Object.values(App.state.optimizerDb);
+    const db = this.getDbWithDynamicScores();
     const totalRuns = db.length;
     
     let goodClusters = 0;
@@ -488,8 +537,18 @@ App.Optimizer = {
     };
   },
 
+  getDbWithDynamicScores() {
+    const db = Object.values(App.state.optimizerDb);
+    const totalTrials = db.length;
+    return db.map(x => {
+      const raw = x.rawScore !== undefined ? x.rawScore : x.score;
+      const deflated = this.applyDeflatedScore(raw, totalTrials);
+      return { ...x, score: deflated };
+    });
+  },
+
   getLeaderboard(filterRegime = 'all') {
-    let db = Object.values(App.state.optimizerDb);
+    let db = this.getDbWithDynamicScores();
     if (filterRegime !== 'all') {
       db = db.filter(x => x.marketClass && x.marketClass.regime === filterRegime);
     }

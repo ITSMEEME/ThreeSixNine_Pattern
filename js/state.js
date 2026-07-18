@@ -36,12 +36,18 @@ App.state = {
     veto: { enabled: false, codes: [], vetoedCount: 0 },
     mlVeto: { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
     shadowTrades: [],
-    driftHistory: []
+    driftHistory: [],
+    martingale: { enabled: false, maxMultiplier: 8, currentStep: 0, accumulatedLossSats: 0, targetProfitSats: 0 }
   },
   optimizerDb: {},
   // "Marktgesetze"-Bibliothek: Muster, die über mehrere Trainings-Epochen und Marktphasen hinweg
   // bestätigt wurden, statt bei jeder einzelnen Analyse sofort übernommen zu werden
-  mlLibrary: { epochs: [], rules: {}, mlFeatures: {} }
+  mlLibrary: { epochs: [], rules: {}, mlFeatures: {} },
+  // Tracks which strategy profile is currently loaded — survives sessions via localStorage.
+  // Lets the UI show "loaded from Leaderboard #X" vs "manually configured".
+  activeStrategyProfile: { testId: null, label: 'Manuell', appliedAt: null },
+  // Selected IndexedDB keys for multi-dataset optimization
+  optimizerDatasets: []
 };
 
 // Set initial balance from config once loaded
@@ -142,7 +148,9 @@ App.saveToLocalStorage = () => {
       orderSide: App.state.orderSide,
       orderType: App.state.orderType,
       bot: App.state.bot,
-      rules: App.state.rules
+      rules: App.state.rules,
+      activeStrategyProfile: App.state.activeStrategyProfile,
+      optimizerDatasets: App.state.optimizerDatasets
     }));
     // Save optimizer database separately to prevent it from being cleared on simulation reset
     localStorage.setItem('paper-perp-optimizer-db', JSON.stringify(App.state.optimizerDb));
@@ -268,7 +276,8 @@ App.applyLoadedState = (data, silent) => {
       veto: data.bot.veto ?? { enabled: false, codes: [], vetoedCount: 0 },
       mlVeto: data.bot.mlVeto ?? { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
       shadowTrades: data.bot.shadowTrades ?? [],
-      driftHistory: data.bot.driftHistory ?? []
+      driftHistory: data.bot.driftHistory ?? [],
+      martingale: data.bot.martingale ?? { enabled: false, maxMultiplier: 8, currentStep: 0, accumulatedLossSats: 0, targetProfitSats: 0 }
     };
   }
   
@@ -291,6 +300,8 @@ App.applyLoadedState = (data, silent) => {
     };
   }
 
+  App.state.activeStrategyProfile = data.activeStrategyProfile ?? { testId: null, label: 'Manuell', appliedAt: null };
+  App.state.optimizerDatasets = data.optimizerDatasets ?? [];
   App.state.optimizerDb = data.optimizerDb ?? {};
 
   if (App.UI && App.UI.renderAll) {
@@ -329,12 +340,15 @@ App.resetState = () => {
     veto: { enabled: false, codes: [], vetoedCount: 0 },
     mlVeto: { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
     shadowTrades: [],
-    driftHistory: []
+    driftHistory: [],
+    martingale: { enabled: false, maxMultiplier: 8, currentStep: 0 }
   };
   App.state.rules = {
     long: [{ interval: '1m', state: 'bull' }],
     short: [{ interval: '1m', state: 'bear' }]
   };
+  App.state.activeStrategyProfile = { testId: null, label: 'Manuell', appliedAt: null };
+  App.state.optimizerDatasets = [];
   App.idCounter = 1;
   try {
     localStorage.removeItem('paper-perp-state');

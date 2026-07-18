@@ -31,6 +31,12 @@ App.Bot = {
             badge.style.cssText = 'font-size: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: var(--amber); border: 1px solid rgba(255, 176, 32, 0.3); background: rgba(255, 176, 32, 0.1); text-transform: uppercase;';
             filtersContainer.appendChild(badge);
           }
+          if (b.martingale && b.martingale.enabled) {
+            const badge = document.createElement('span');
+            badge.textContent = `Martingale (${b.martingale.maxMultiplier}x)`;
+            badge.style.cssText = 'font-size: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: #ff5e62; border: 1px solid rgba(255, 94, 98, 0.3); background: rgba(255, 94, 98, 0.1); text-transform: uppercase;';
+            filtersContainer.appendChild(badge);
+          }
           if (b.mlVeto && b.mlVeto.model) {
             const badge = document.createElement('span');
             badge.textContent = 'Kelly Sizing';
@@ -43,6 +49,90 @@ App.Bot = {
             badge.style.cssText = 'font-size: 8px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: var(--text-faint); border: 1px solid var(--border-soft); background: rgba(255, 255, 255, 0.02); text-transform: uppercase;';
             filtersContainer.appendChild(badge);
           }
+        }
+
+        // --- Collapsible strategy detail section ---
+        const detailSourceEl = document.getElementById('bot-card-detail-source');
+        const detailContentEl = document.getElementById('bot-card-detail-content');
+        const detailToggleEl = document.getElementById('bot-card-detail-toggle');
+        const detailArrowEl = document.getElementById('bot-card-detail-arrow');
+
+        if (detailSourceEl) {
+          const profile = App.state.activeStrategyProfile;
+          if (profile && profile.testId) {
+            const relTime = App.formatRelativeTime(profile.appliedAt);
+            detailSourceEl.textContent = `📋 ${profile.label} · ${relTime}`;
+          } else {
+            detailSourceEl.textContent = '📋 Manuell konfiguriert';
+          }
+        }
+
+        if (detailContentEl) {
+          const sections = [];
+
+          // 1. Entry rules
+          const rules = App.state.rules;
+          const stateLabel = (s) => s === 'bull' ? 'Bull' : s === 'bear' ? 'Bear' : 'Neutral';
+          const longText = (rules.long || []).map(r => `${r.interval} ${stateLabel(r.state)}`).join(' · ');
+          const shortText = (rules.short || []).map(r => `${r.interval} ${stateLabel(r.state)}`).join(' · ');
+          sections.push(`<div style="margin-bottom:4px;"><span style="font-weight:700; color:var(--long);">LONG:</span> ${longText || '–'}</div>`);
+          sections.push(`<div style="margin-bottom:6px;"><span style="font-weight:700; color:var(--short);">SHORT:</span> ${shortText || '–'}</div>`);
+
+          // Martingale status in info list
+          if (b.martingale && b.martingale.enabled) {
+            let mult = 1.0;
+            let currentQty = b.qtyUsd;
+            if (b.martingale.currentStep > 0) {
+              const lastPrice = App.state.lastPrice || 60000;
+              const targetProfit = b.martingale.targetProfitSats || (App.Engine.margin(b.qtyUsd, lastPrice, b.leverage) * (b.tpPercent / 100));
+              const reqProfitSats = targetProfit + (b.martingale.accumulatedLossSats || 0);
+              const marginSatsFor1Usd = App.Engine.margin(1.0, lastPrice, b.leverage);
+              const profitPerUsd = marginSatsFor1Usd * (b.tpPercent / 100);
+              currentQty = reqProfitSats / profitPerUsd;
+              mult = currentQty / b.qtyUsd;
+            }
+            sections.push(`<div style="margin-bottom:6px; color:#ff5e62;"><span style="font-weight:700;">Martingale:</span> Aktiv (Stufe ${b.martingale.currentStep} &middot; Mult. ×${mult.toFixed(2)} [Einsatz $${Math.round(currentQty)}] &middot; Limit ${b.martingale.maxMultiplier}x)</div>`);
+          }
+
+          // 2. Veto filter codes
+          if (b.veto && b.veto.enabled && b.veto.codes && b.veto.codes.length > 0) {
+            const labels = b.veto.codes.map(c => App.TradeAnalyzer.REASON_LABELS[c] || c);
+            sections.push(`<div style="color:var(--amber); margin-bottom:4px;">🛡 <span style="font-weight:600;">Veto-Filter:</span></div>`);
+            labels.forEach(l => sections.push(`<div style="padding-left:12px; font-size:8px;">• ${l}</div>`));
+            sections.push(`<div style="margin-bottom:6px;"></div>`);
+          }
+
+          // 3. ML model weights
+          if (b.mlVeto && b.mlVeto.enabled && b.mlVeto.model) {
+            const model = b.mlVeto.model;
+            sections.push(`<div style="color:#a78bfa; margin-bottom:4px;">🧠 <span style="font-weight:600;">ML-Merkmale</span> <span style="font-weight:400; color:var(--text-faint);">(Schwelle ${Math.round((b.mlVeto.threshold || 0.6) * 100)}%)</span></div>`);
+            const featureLabels = App.TradeAnalyzer.ML_FEATURE_LABELS || {};
+            (model.featureNames || []).forEach((name, i) => {
+              const w = model.weights[i];
+              const wColor = Math.abs(w) > 0.3 ? 'var(--short)' : 'var(--text-dim)';
+              const label = featureLabels[name] || name;
+              sections.push(`<div style="display:flex; justify-content:space-between; padding-left:12px; font-size:8px;"><span>${label}</span><span style="color:${wColor}; font-weight:700; font-family:var(--mono);">${w >= 0 ? '+' : ''}${w.toFixed(2)}</span></div>`);
+            });
+            if (model.trainedOn) {
+              sections.push(`<div style="padding-left:12px; font-size:7.5px; color:var(--text-faint); margin-top:2px;">Trainiert auf ${model.trainedOn} Trades (${model.trainedOnLosses} Verluste)</div>`);
+            }
+          }
+
+          detailContentEl.innerHTML = sections.join('');
+        }
+
+        // Wire toggle (only once — avoid duplicate listeners by checking data flag)
+        if (detailToggleEl && !detailToggleEl._wired) {
+          detailToggleEl._wired = true;
+          detailToggleEl.addEventListener('click', () => {
+            const content = document.getElementById('bot-card-detail-content');
+            const arrow = document.getElementById('bot-card-detail-arrow');
+            if (content && arrow) {
+              const open = content.style.display !== 'none';
+              content.style.display = open ? 'none' : 'block';
+              arrow.textContent = open ? '▸' : '▾';
+            }
+          });
         }
       } else {
         cardEl.style.display = 'none';
@@ -67,18 +157,65 @@ App.Bot = {
       }
     }
 
+    // Sync input values (including martingale checkbox & select)
     const inputs = {
-      'bot-max-open': b.maxOpen,
-      'bot-cooldown': b.cooldownMin,
       'bot-qty': b.qtyUsd,
       'bot-lev': b.leverage,
       'bot-tp-pct': b.tpPercent,
-      'bot-sl-pct': b.slPercent
+      'bot-sl-pct': b.slPercent,
+      'bot-martingale-limit': b.martingale?.maxMultiplier ?? 8
     };
     for (const [id, val] of Object.entries(inputs)) {
       const el = document.getElementById(id);
       if (el && document.activeElement !== el) {
         el.value = val;
+      }
+    }
+
+    const liveMaxOpenInput = document.getElementById('bot-max-open');
+    if (liveMaxOpenInput && document.activeElement !== liveMaxOpenInput) {
+      if (b.martingale && b.martingale.enabled) {
+        liveMaxOpenInput.value = '1';
+        liveMaxOpenInput.disabled = true;
+        liveMaxOpenInput.style.opacity = '0.5';
+        liveMaxOpenInput.style.cursor = 'not-allowed';
+        const parentField = liveMaxOpenInput.closest('.field');
+        if (parentField) parentField.style.opacity = '0.5';
+      } else {
+        liveMaxOpenInput.value = b.maxOpen;
+        liveMaxOpenInput.disabled = false;
+        liveMaxOpenInput.style.opacity = '';
+        liveMaxOpenInput.style.cursor = '';
+        const parentField = liveMaxOpenInput.closest('.field');
+        if (parentField) parentField.style.opacity = '';
+      }
+    }
+
+    const liveCooldownInput = document.getElementById('bot-cooldown');
+    if (liveCooldownInput && document.activeElement !== liveCooldownInput) {
+      if (b.martingale && b.martingale.enabled) {
+        liveCooldownInput.value = '0';
+        liveCooldownInput.disabled = true;
+        liveCooldownInput.style.opacity = '0.5';
+        liveCooldownInput.style.cursor = 'not-allowed';
+        const parentField = liveCooldownInput.closest('.field');
+        if (parentField) parentField.style.opacity = '0.5';
+      } else {
+        liveCooldownInput.value = b.cooldownMin;
+        liveCooldownInput.disabled = false;
+        liveCooldownInput.style.opacity = '';
+        liveCooldownInput.style.cursor = '';
+        const parentField = liveCooldownInput.closest('.field');
+        if (parentField) parentField.style.opacity = '';
+      }
+    }
+
+    const martCb = document.getElementById('bot-martingale-enabled');
+    const martWrap = document.getElementById('bot-martingale-limit-wrap');
+    if (martCb) {
+      martCb.checked = b.martingale?.enabled ?? false;
+      if (martWrap) {
+        martWrap.style.display = martCb.checked ? 'flex' : 'none';
       }
     }
 
@@ -167,6 +304,9 @@ App.Bot = {
         }).join('');
       }
     }
+
+    // Keep filter info panels in sync whenever the bot UI is re-rendered
+    if (App.UI && App.UI.renderActiveFiltersInfo) App.UI.renderActiveFiltersInfo();
   },
 
   logBot(message) {
@@ -312,6 +452,44 @@ App.Bot = {
 
     this.resolveShadowTrades();
 
+    // --- Martingale State Update ---
+    if (b.martingale && b.martingale.enabled && b.martingale.lastPositionId) {
+      const closedTrade = App.state.history.find(h => h.id === b.martingale.lastPositionId);
+      if (closedTrade) {
+        if (closedTrade.reason === 'tp') {
+          b.martingale.currentStep = 0;
+          b.martingale.accumulatedLossSats = 0;
+          this.logBot(`🎉 Martingale: Letzter Trade war ein Gewinn (TP). Zurück auf Basisbetrag.`);
+        } else if (closedTrade.reason === 'sl' || closedTrade.reason === 'liquidation') {
+          b.martingale.currentStep++;
+          const lossSats = Math.abs(closedTrade.pnlSats);
+          b.martingale.accumulatedLossSats = (b.martingale.accumulatedLossSats || 0) + lossSats;
+
+          // Check if safety limit (based on step count) is exceeded
+          const maxSteps = b.martingale.maxMultiplier || 8;
+          if (b.martingale.currentStep > maxSteps) {
+            b.martingale.currentStep = 0;
+            b.martingale.accumulatedLossSats = 0;
+            this.logBot(`⚠ Martingale: Nächster Schritt (${b.martingale.currentStep}) übersteigt Limit von ${maxSteps} Schritten. Zurück auf Basisbetrag.`);
+          } else {
+            // Calculate next qty for logging purposes
+            const nextPrice = App.state.lastPrice || closedTrade.exitPrice;
+            const nextLeverage = b.leverage;
+            const nextTpPercent = b.tpPercent;
+            const targetProfit = b.martingale.targetProfitSats || (App.Engine.margin(b.qtyUsd, nextPrice, nextLeverage) * (nextTpPercent / 100));
+            const reqProfitSats = targetProfit + b.martingale.accumulatedLossSats;
+            const marginSatsFor1Usd = App.Engine.margin(1.0, nextPrice, nextLeverage);
+            const profitPerUsd = marginSatsFor1Usd * (nextTpPercent / 100);
+            const nextQtyUsd = reqProfitSats / profitPerUsd;
+
+            this.logBot(`⚠ Martingale: Verlust erlitten. Stufe ${b.martingale.currentStep}. Verlust: ${Math.round(lossSats).toLocaleString()} sats. Nächster Einsatz: $${Math.round(nextQtyUsd)}`);
+          }
+        }
+        b.martingale.lastPositionId = null;
+        App.saveToLocalStorage();
+      }
+    }
+
     if (!b.active) return;
 
     const checkRules = (rulesList) => {
@@ -375,19 +553,21 @@ App.Bot = {
 
     const now = Date.now();
     const elapsedMs = now - b.lastTradeTime;
-    const cooldownMs = b.cooldownMin * 60000;
+    const cooldownMs = (b.martingale && b.martingale.enabled) ? 0 : b.cooldownMin * 60000;
     if (elapsedMs < cooldownMs) return;
 
-    if (App.state.positions.length >= b.maxOpen) return;
+    // Martingale allows only 1 open trade at a time
+    const maxAllowed = (b.martingale && b.martingale.enabled) ? 1 : b.maxOpen;
+    if (App.state.positions.length >= maxAllowed) return;
 
     const side = triggerAction;
     const entryPrice = App.Engine.fillPrice(side, 'market', App.state.lastPrice, null);
 
-    // Kelly-Positionsgröße: skaliert die Positionsgröße basierend auf der ML-geschätzten
-    // Gewinnwahrscheinlichkeit und dem TP/SL-Verhältnis — deckungsgleich mit dem Backtest.
+    // Calculate base qty, optionally adjusted by Kelly (bypassed if martingale is active)
     let tradeQtyUsd = b.qtyUsd;
     let kellyFactor = 1.0;
-    if (b.mlVeto && b.mlVeto.model) {
+    const martingaleActive = b.martingale && b.martingale.enabled;
+    if (!martingaleActive && b.mlVeto && b.mlVeto.model) {
       const liveCandles = App.API.activeCandles['1m'];
       if (liveCandles && liveCandles.length > 0) {
         const pLoss = App.TradeAnalyzer.predictLossProbability(b.mlVeto.model, liveCandles, liveCandles.length - 1, side);
@@ -395,6 +575,20 @@ App.Bot = {
         const kelly = App.Engine.kellyAdjustedQty(b.qtyUsd, pWin, b.tpPercent, b.slPercent);
         tradeQtyUsd = kelly.qty;
         kellyFactor = kelly.factor;
+      }
+    }
+
+    // Apply Martingale recovery if enabled
+    let martingaleInfo = '';
+    if (b.martingale && b.martingale.enabled) {
+      if (b.martingale.currentStep > 0) {
+        const targetProfit = b.martingale.targetProfitSats || (App.Engine.margin(b.qtyUsd, entryPrice, b.leverage) * (b.tpPercent / 100));
+        const reqProfitSats = targetProfit + (b.martingale.accumulatedLossSats || 0);
+        const marginSatsFor1Usd = App.Engine.margin(1.0, entryPrice, b.leverage);
+        const profitPerUsd = marginSatsFor1Usd * (b.tpPercent / 100);
+        tradeQtyUsd = reqProfitSats / profitPerUsd;
+        
+        martingaleInfo = ` (Martingale-Recovery -> $${Math.round(tradeQtyUsd)} [Stufe ${b.martingale.currentStep}])`;
       }
     }
 
@@ -410,10 +604,19 @@ App.Bot = {
     const slSats = Math.round(marginSats * (b.slPercent / 100));
 
     const kellyInfo = kellyFactor !== 1.0 ? ` (Kelly ×${kellyFactor.toFixed(2)} → ${App.UI.fmtUsd(tradeQtyUsd)})` : '';
-    this.logBot(`🤖 Signal erkannt: ${side.toUpperCase()}${kellyInfo}...`);
+    this.logBot(`🤖 Signal erkannt: ${side.toUpperCase()}${kellyInfo}${martingaleInfo}...`);
     const success = App.Engine.openPosition(side, tradeQtyUsd, b.leverage, 'market', App.state.lastPrice, null, tpSats, slSats);
     if (success) {
       b.lastTradeTime = now;
+      const newPos = App.state.positions[App.state.positions.length - 1];
+      if (newPos) {
+        if (b.martingale && b.martingale.enabled) {
+          b.martingale.lastPositionId = newPos.id;
+          if (b.martingale.currentStep === 0) {
+            b.martingale.targetProfitSats = tpSats;
+          }
+        }
+      }
       this.logBot(`🤖 ${side.toUpperCase()} eröffnet @ ${App.UI.fmtUsd(entryPrice)} (TP: +${tpSats.toLocaleString()} sats, SL: -${slSats.toLocaleString()} sats).`);
       App.UI.renderAll();
     }
