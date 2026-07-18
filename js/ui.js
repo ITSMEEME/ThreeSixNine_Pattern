@@ -283,6 +283,7 @@ App.UI = {
     this.renderRules();
     if (App.Chart && App.Chart.updateLiqLines) App.Chart.updateLiqLines();
     this.syncResultsVisibility();
+    this.renderActiveFiltersInfo();
     App.saveToLocalStorage();
   },
 
@@ -486,13 +487,47 @@ App.UI = {
     // Maximize / Restore tab container
     const btnMax = document.getElementById('btn-maximize-list');
     const wrapMax = document.getElementById('tabs-container-wrap');
-    if (btnMax && wrapMax) {
-      btnMax.addEventListener('click', () => {
-        const isMax = wrapMax.classList.toggle('maximized');
+    
+    const toggleMaximize = () => {
+      if (!wrapMax) return;
+      const isMax = wrapMax.classList.toggle('maximized');
+      if (btnMax) {
         btnMax.textContent = isMax ? '⤫' : '⤢';
         btnMax.title = isMax ? 'Schließen' : 'Vergrößern';
+      }
+    };
+
+    if (btnMax) {
+      btnMax.addEventListener('click', toggleMaximize);
+    }
+
+    // Double-click on tabs bar or tab headers to toggle maximize
+    const tabsContainer = document.querySelector('.tabs');
+    if (tabsContainer) {
+      tabsContainer.addEventListener('dblclick', (e) => {
+        // Only trigger if we double click the tabs bar background, the tab buttons, or the counts
+        const isTabElement = e.target.classList.contains('tabs') || 
+                             e.target.classList.contains('tab') || 
+                             e.target.classList.contains('count');
+        if (isTabElement && e.target.id !== 'btn-maximize-list') {
+          toggleMaximize();
+        }
       });
     }
+
+    // Double-click on list wraps (like backtest, positions, history) to toggle maximize
+    document.querySelectorAll('.list-wrap').forEach(wrap => {
+      wrap.addEventListener('dblclick', (e) => {
+        // Prevent maximizing when double-clicking inputs, buttons, selects, etc.
+        const ignoreTags = ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'A', 'OPTION', 'LABEL'];
+        if (ignoreTags.includes(e.target.tagName)) return;
+        
+        // Prevent maximizing if clicking inside rule rows or input wrappers
+        if (e.target.closest('.rule-row') || e.target.closest('.input-wrap') || e.target.closest('.backtest-select')) return;
+
+        toggleMaximize();
+      });
+    });
 
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && wrapMax && wrapMax.classList.contains('maximized')) {
@@ -542,6 +577,98 @@ App.UI = {
           }
         });
       }
+    }
+    // Martingale Live Bot event handlers
+    const liveMartCb = document.getElementById('bot-martingale-enabled');
+    const liveMartLimitWrap = document.getElementById('bot-martingale-limit-wrap');
+    const liveMartLimit = document.getElementById('bot-martingale-limit');
+
+    if (liveMartCb) {
+      liveMartCb.addEventListener('change', () => {
+        if (!App.state.bot.martingale) App.state.bot.martingale = { enabled: false, maxMultiplier: 8, currentStep: 0 };
+        App.state.bot.martingale.enabled = liveMartCb.checked;
+        if (liveMartLimitWrap) {
+          liveMartLimitWrap.style.display = liveMartCb.checked ? 'flex' : 'none';
+        }
+        App.saveToLocalStorage();
+        App.Bot.renderBotUI();
+      });
+    }
+
+    if (liveMartLimit) {
+      liveMartLimit.addEventListener('change', () => {
+        if (!App.state.bot.martingale) App.state.bot.martingale = { enabled: false, maxMultiplier: 8, currentStep: 0 };
+        App.state.bot.martingale.maxMultiplier = parseInt(liveMartLimit.value);
+        App.saveToLocalStorage();
+        App.Bot.renderBotUI();
+      });
+    }
+
+    // Martingale Backtest event handlers
+    const btMartCb = document.getElementById('backtest-martingale-enabled');
+    const btMartLimitWrap = document.getElementById('backtest-martingale-limit-wrap');
+    
+    const updateBacktestUnusedParamsState = () => {
+      const maxOpenInput = document.getElementById('backtest-max-open');
+      const cooldownInput = document.getElementById('backtest-cooldown');
+      
+      if (maxOpenInput) {
+        if (btMartCb && btMartCb.checked) {
+          if (!maxOpenInput.dataset.originalValue) {
+            maxOpenInput.dataset.originalValue = maxOpenInput.value;
+          }
+          maxOpenInput.value = '1';
+          maxOpenInput.disabled = true;
+          maxOpenInput.style.opacity = '0.5';
+          maxOpenInput.style.cursor = 'not-allowed';
+          const parentField = maxOpenInput.closest('.field');
+          if (parentField) parentField.style.opacity = '0.5';
+        } else {
+          if (maxOpenInput.dataset.originalValue) {
+            maxOpenInput.value = maxOpenInput.dataset.originalValue;
+            delete maxOpenInput.dataset.originalValue;
+          }
+          maxOpenInput.disabled = false;
+          maxOpenInput.style.opacity = '';
+          maxOpenInput.style.cursor = '';
+          const parentField = maxOpenInput.closest('.field');
+          if (parentField) parentField.style.opacity = '';
+        }
+      }
+
+      if (cooldownInput) {
+        if (btMartCb && btMartCb.checked) {
+          if (!cooldownInput.dataset.originalValue) {
+            cooldownInput.dataset.originalValue = cooldownInput.value;
+          }
+          cooldownInput.value = '0';
+          cooldownInput.disabled = true;
+          cooldownInput.style.opacity = '0.5';
+          cooldownInput.style.cursor = 'not-allowed';
+          const parentField = cooldownInput.closest('.field');
+          if (parentField) parentField.style.opacity = '0.5';
+        } else {
+          if (cooldownInput.dataset.originalValue) {
+            cooldownInput.value = cooldownInput.dataset.originalValue;
+            delete cooldownInput.dataset.originalValue;
+          }
+          cooldownInput.disabled = false;
+          cooldownInput.style.opacity = '';
+          cooldownInput.style.cursor = '';
+          const parentField = cooldownInput.closest('.field');
+          if (parentField) parentField.style.opacity = '';
+        }
+      }
+    };
+
+    if (btMartCb) {
+      btMartCb.addEventListener('change', () => {
+        if (btMartLimitWrap) {
+          btMartLimitWrap.style.display = btMartCb.checked ? 'flex' : 'none';
+        }
+        updateBacktestUnusedParamsState();
+      });
+      updateBacktestUnusedParamsState();
     }
 
     const applyPreset = (preset) => {
@@ -643,6 +770,14 @@ App.UI = {
       });
     }
 
+    const viewModeEl = document.getElementById('leaderboard-view-mode');
+    if (viewModeEl) {
+      viewModeEl.addEventListener('change', () => {
+        const filterVal = document.getElementById('leaderboard-filter')?.value || 'all';
+        this.renderLeaderboard(filterVal);
+      });
+    }
+
     // Reset Optimizer DB event
     const resetOptDbBtn = document.getElementById('btn-reset-optimizer-db');
     if (resetOptDbBtn) {
@@ -660,8 +795,102 @@ App.UI = {
     }
   },
 
+  // Renders the active Veto/ML-filter information panel for:
+  // - the Live Bot panel (#bot-active-filters-info)
+  // - Backtest section 2 (#backtest-active-filters-info)
+  // Both show the exact same filters since the backtest mirrors the live bot config.
+  renderActiveFiltersInfo() {
+    const b = App.state.bot;
+    const hasVeto = b.veto && b.veto.enabled && b.veto.codes && b.veto.codes.length > 0;
+    const hasMl   = b.mlVeto && b.mlVeto.enabled && b.mlVeto.model;
+    const hasAny  = hasVeto || hasMl;
+
+    const buildHtml = () => {
+      const parts = [];
+
+      if (hasVeto) {
+        const patterns = b.veto.patterns || [];
+        const codes    = b.veto.codes || [];
+        parts.push(`
+          <div style="margin-bottom:${hasMl ? '10px' : '0'}; padding-bottom:${hasMl ? '10px' : '0'}; border-bottom:${hasMl ? '1px solid var(--border-soft)' : 'none'};">
+            <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+              <span style="font-size:10px; font-weight:700; color:#ffb020;">🛡 Regel-basiertes Veto (Muster-Filter)</span>
+              <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(255,176,32,0.12); color:#ffb020; border:1px solid rgba(255,176,32,0.25);">${codes.length} Muster aktiv</span>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:3px;">
+              ${codes.map(code => {
+                const label   = (App.TradeAnalyzer && App.TradeAnalyzer.REASON_LABELS && App.TradeAnalyzer.REASON_LABELS[code]) || code;
+                const pattern = patterns.find(p => p.code === code);
+                const pct     = pattern && pattern.sharePercent != null ? ` &middot; ${pattern.sharePercent.toFixed(0)}% Verlust-Anteil` : '';
+                return `<div style="display:flex; align-items:flex-start; gap:5px; font-size:9px; color:var(--text-dim);">
+                  <span style="color:#ffb020; flex-shrink:0; margin-top:1px;">•</span>
+                  <span><span style="font-family:var(--mono); color:var(--text); font-weight:600;">${code}</span> — ${label}${pct}</span>
+                </div>`;
+              }).join('')}
+            </div>
+            <div style="margin-top:4px; font-size:8px; color:var(--text-faint);">Vetoed bisher: ${b.veto.vetoedCount || 0} Trade(s) im Live-Betrieb</div>
+          </div>
+        `);
+      }
+
+      if (hasMl) {
+        const model    = b.mlVeto.model;
+        const thresh   = Math.round((b.mlVeto.threshold || 0.6) * 100);
+        const labels   = App.TradeAnalyzer && App.TradeAnalyzer.ML_FEATURE_LABELS || {};
+        const features = (model.featureNames || []).map((name, i) => {
+          const w     = model.weights[i];
+          const wSign = w >= 0 ? '+' : '';
+          const wCol  = Math.abs(w) > 0.3 ? 'var(--short)' : 'var(--text-dim)';
+          return `<div style="display:flex; justify-content:space-between; font-size:9px; padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04);">
+            <span style="color:var(--text-dim);">${labels[name] || name}</span>
+            <span style="font-family:var(--mono); font-weight:700; color:${wCol};">${wSign}${w.toFixed(2)}</span>
+          </div>`;
+        }).join('');
+        const trainInfo = model.trainedOn
+          ? `<div style="font-size:8px; color:var(--text-faint); margin-top:4px;">Trainiert auf ${model.trainedOn} Trades (${model.trainedOnLosses} Verluste)</div>`
+          : '';
+        parts.push(`
+          <div>
+            <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+              <span style="font-size:10px; font-weight:700; color:#a78bfa;">🧠 ML-Filter (Verlust-Prädiktor)</span>
+              <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(167,139,250,0.12); color:#a78bfa; border:1px solid rgba(167,139,250,0.25);">Schwelle ${thresh}%</span>
+            </div>
+            <div style="font-size:9px; color:var(--text-faint); margin-bottom:6px;">
+              Blockiert Trades wenn die geschätzte Verlustwahrscheinlichkeit ≥ ${thresh}% ist.
+            </div>
+            ${features}
+            ${trainInfo}
+            <div style="margin-top:4px; font-size:8px; color:var(--text-faint);">Vetoed bisher: ${b.mlVeto.vetoedCount || 0} Trade(s) im Live-Betrieb · Kelly-Sizing aktiv</div>
+          </div>
+        `);
+      }
+
+      if (!hasAny) {
+        parts.push(`<div style="color:var(--text-faint); font-size:10px;">Keine Filter aktiv — alle Signale werden ungefiltert ausgeführt.</div>`);
+      }
+
+      return parts.join('');
+    };
+
+    // --- Render into Bot panel ---
+    const botWrap    = document.getElementById('bot-active-filters-info');
+    const botContent = document.getElementById('bot-active-filters-content');
+    if (botWrap && botContent) {
+      botContent.innerHTML = buildHtml();
+      botWrap.style.display = 'block';
+    }
+
+    // --- Render into Backtest section 2 ---
+    const btWrap    = document.getElementById('backtest-active-filters-info');
+    const btContent = document.getElementById('backtest-active-filters-content');
+    if (btWrap && btContent) {
+      btContent.innerHTML = buildHtml();
+      btWrap.style.display = 'block';
+    }
+  },
+
   renderLeaderboard(filterRegime = 'all') {
-    const list = App.Optimizer.getLeaderboard(filterRegime);
+    let list = App.Optimizer.getLeaderboard(filterRegime);
     const tbody = document.querySelector('#table-optimizer-leaderboard tbody');
     if (!tbody) return;
 
@@ -670,9 +899,42 @@ App.UI = {
       return;
     }
 
+    const viewMode = document.getElementById('leaderboard-view-mode')?.value || 'profiles';
+    
+    if (viewMode === 'profiles') {
+      // Top 10 completed strategy profiles
+      let profileList = list.filter(item => (item.mlVeto && item.mlVeto.model) || (item.veto && item.veto.enabled));
+      
+      let showFallbackMsg = false;
+      if (profileList.length === 0) {
+        profileList = list;
+        showFallbackMsg = true;
+      }
+      
+      profileList.sort((a, b) => {
+        const scoreA = a.postMlScore !== null && a.postMlScore !== undefined ? a.postMlScore : a.score;
+        const scoreB = b.postMlScore !== null && b.postMlScore !== undefined ? b.postMlScore : b.score;
+        return scoreB - scoreA;
+      });
+      
+      list = profileList.slice(0, 10);
+      
+      if (showFallbackMsg && App.Optimizer.state.isRunning === false) {
+        // Only show toast once if needed, to avoid spam
+        if (!this._fallbackToastShown) {
+          App.UI.showToast('Bislang keine optimierten ML-Veto-Profile verfügbar. Zeige Top 10 Standard-Kandidaten.', true);
+          this._fallbackToastShown = true;
+        }
+      }
+    } else {
+      this._fallbackToastShown = false;
+    }
+
     tbody.innerHTML = list.map((item, idx) => {
       const returnCls = item.results.totalReturnPercent >= 0 ? 'long' : 'short';
-      const scoreColor = item.score >= 80 ? 'var(--long)' : item.score >= 50 ? '#ffb020' : 'var(--short)';
+      
+      const displayScore = (item.postMlScore !== null && item.postMlScore !== undefined) ? item.postMlScore : item.score;
+      const scoreColor = displayScore >= 80 ? 'var(--long)' : displayScore >= 50 ? '#ffb020' : 'var(--short)';
 
       const v = item.validation || {};
       const badgeParts = [];
@@ -691,9 +953,20 @@ App.UI = {
         const phzColor = v.crossPhaseScore >= 70 ? 'var(--long)' : v.crossPhaseScore >= 40 ? '#ffb020' : 'var(--short)';
         badgeParts.push(`<span style="color:${phzColor};">PHZ</span>`);
       }
-      // Deflated-Sharpe-Korrektur: Badge zeigt an, dass der Score um Multiple-Testing-Risiko korrigiert ist
+      
+      const hasMl = item.mlVeto && item.mlVeto.model;
+      const hasVeto = item.veto && item.veto.enabled;
+      if (hasMl) {
+        badgeParts.push(`<span style="color:var(--teal); font-weight:bold; border:1px solid var(--teal); border-radius:3px; padding:0 3px; font-size:7px;" title="ML-Veto-Modell aktiv">ML</span>`);
+      }
+      if (hasVeto) {
+        badgeParts.push(`<span style="color:#d53f8c; font-weight:bold; border:1px solid #d53f8c; border-radius:3px; padding:0 3px; font-size:7px;" title="Regel-basiertes Veto aktiv">VETO</span>`);
+      }
+
       if (item.rawScore !== undefined && item.rawScore !== item.score) {
-        badgeParts.push(`<span style="color:#9f7aea;" title="Deflated Score (Roh: ${item.rawScore})">DSR</span>`);
+        const total = Object.keys(App.state.optimizerDb).length;
+        const penaltyPct = Math.round(App.Optimizer.deflatedScorePenalty(total) * 100);
+        badgeParts.push(`<span style="color:#9f7aea;" title="Deflated Score (Roh: ${item.rawScore}, Abschlag: ${penaltyPct}%)">DSR</span>`);
       }
 
       const rowId = `lb-row-${idx}`;
@@ -713,20 +986,126 @@ App.UI = {
       if (v.stabilityScore !== null && v.stabilityScore !== undefined) {
         const staColor = v.stabilityScore >= 80 ? 'var(--long)' : v.stabilityScore >= 50 ? '#ffb020' : 'var(--short)';
         validationDetailHtml += `<div style="color:${staColor};">Stabilität bei Parameter-Variation: ${v.stabilityScore}/100</div>`;
-      } else {
-        validationDetailHtml += `<div style="color:var(--text-faint);">Kein Stabilitäts-Check (Score war unter 65)</div>`;
       }
       if (v.crossPhaseScore !== null && v.crossPhaseScore !== undefined) {
         const phzColor = v.crossPhaseScore >= 70 ? 'var(--long)' : v.crossPhaseScore >= 40 ? '#ffb020' : 'var(--short)';
         const detail = (v.crossPhaseDetails || []).map(p => `${p.label}: ${p.score}`).join(', ');
         validationDetailHtml += `<div style="color:${phzColor};">Cross-Phasen-Check (Ø ${v.crossPhaseScore}/100): ${detail || '–'}</div>`;
-      } else {
-        validationDetailHtml += `<div style="color:var(--text-faint);">Kein Cross-Phasen-Check</div>`;
+      }
+
+      // Render pre/post-ML comparison grids
+      let mlPerformanceHtml = '';
+      if (hasMl && item.mlVeto.beforeAfter) {
+        const ba = item.mlVeto.beforeAfter;
+        const profitImprovement = ba.afterReturn - ba.beforeReturn;
+        const winrateImprovement = ba.afterWinRate - ba.beforeWinRate;
+        const blockedPct = Math.round((ba.mlVetoedTrades / (ba.beforeTrades || 1)) * 100);
+
+        mlPerformanceHtml = `
+          <div style="margin-top: 10px; margin-bottom: 10px; padding: 10px; border-radius: 6px; background: rgba(0, 150, 136, 0.08); border: 1px solid rgba(0, 150, 136, 0.2);">
+            <div style="font-weight: 600; color: var(--teal); margin-bottom: 8px; display:flex; justify-content:space-between; align-items:center;">
+              <span>🤖 ML-Filter-Performance (Durchschnitt über alle Zeiträume)</span>
+              <span style="font-size: 8px; padding: 2px 5px; border-radius: 3px; background: var(--teal); color: black; font-weight: bold;">TRAINIERT & AKTIV</span>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:10px; color:var(--text-dim);">
+              <thead>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.1); font-weight: bold; color: var(--text-faint);">
+                  <th style="text-align:left; padding:4px 0;">Metrik</th>
+                  <th style="text-align:right; padding:4px 8px;">Vor ML</th>
+                  <th style="text-align:right; padding:4px 8px; color:var(--teal);">Nach ML</th>
+                  <th style="text-align:right; padding:4px 0; color:var(--long);">Verbesserung</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+                  <td style="padding:6px 0;">Durchschnitts-Rendite</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.beforeReturn.toFixed(2)}%</td>
+                  <td style="text-align:right; padding:6px 8px; color:var(--teal); font-weight:bold;">${ba.afterReturn.toFixed(2)}%</td>
+                  <td style="text-align:right; padding:6px 0; color:${profitImprovement >= 0 ? 'var(--long)' : 'var(--short)'}; font-weight:bold;">
+                    ${profitImprovement >= 0 ? '+' : ''}${profitImprovement.toFixed(2)}%
+                  </td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+                  <td style="padding:6px 0;">Gewinnquote (Win Rate)</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.beforeWinRate.toFixed(1)}%</td>
+                  <td style="text-align:right; padding:6px 8px; color:var(--teal); font-weight:bold;">${ba.afterWinRate.toFixed(1)}%</td>
+                  <td style="text-align:right; padding:6px 0; color:${winrateImprovement >= 0 ? 'var(--long)' : 'var(--short)'}; font-weight:bold;">
+                    ${winrateImprovement >= 0 ? '+' : ''}${winrateImprovement.toFixed(1)}%
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:6px 0;">Ausgeführte Trades</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.beforeTrades}</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.afterTrades}</td>
+                  <td style="text-align:right; padding:6px 0; color:#ffb020;">
+                    -${ba.mlVetoedTrades} blockiert (${blockedPct}%)
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      let vetoPerformanceHtml = '';
+      if (hasVeto && item.veto.beforeAfter) {
+        const ba = item.veto.beforeAfter;
+        const profitImprovement = ba.afterReturn - ba.beforeReturn;
+        const winrateImprovement = ba.afterWinRate - ba.beforeWinRate;
+        const blockedPct = Math.round((ba.vetoedTrades / (ba.beforeTrades || 1)) * 100);
+
+        vetoPerformanceHtml = `
+          <div style="margin-top: 10px; margin-bottom: 10px; padding: 10px; border-radius: 6px; background: rgba(213, 63, 140, 0.08); border: 1px solid rgba(213, 63, 140, 0.2);">
+            <div style="font-weight: 600; color: #d53f8c; margin-bottom: 6px; display:flex; justify-content:space-between; align-items:center;">
+              <span>🛡 Regel-basiertes Veto (Muster-Filter)</span>
+              <span style="font-size: 8px; padding: 2px 5px; border-radius: 3px; background: #d53f8c; color: white; font-weight: bold;">TRAINIERT & AKTIV</span>
+            </div>
+            <div style="margin-bottom: 8px; font-size: 9px; color: var(--text-dim);">
+              Blockierte Verlust-Muster: <strong>${(item.veto.patterns || []).map(p => `${p.label} (${p.sharePercent}%)`).join(', ')}</strong>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:10px; color:var(--text-dim);">
+              <thead>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.1); font-weight: bold; color: var(--text-faint);">
+                  <th style="text-align:left; padding:4px 0;">Metrik</th>
+                  <th style="text-align:right; padding:4px 8px;">Vor Veto</th>
+                  <th style="text-align:right; padding:4px 8px; color:#d53f8c;">Nach Veto</th>
+                  <th style="text-align:right; padding:4px 0; color:var(--long);">Verbesserung</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+                  <td style="padding:6px 0;">Durchschnitts-Rendite</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.beforeReturn.toFixed(2)}%</td>
+                  <td style="text-align:right; padding:6px 8px; color:#d53f8c; font-weight:bold;">${ba.afterReturn.toFixed(2)}%</td>
+                  <td style="text-align:right; padding:6px 0; color:${profitImprovement >= 0 ? 'var(--long)' : 'var(--short)'}; font-weight:bold;">
+                    ${profitImprovement >= 0 ? '+' : ''}${profitImprovement.toFixed(2)}%
+                  </td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+                  <td style="padding:6px 0;">Gewinnquote (Win Rate)</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.beforeWinRate.toFixed(1)}%</td>
+                  <td style="text-align:right; padding:6px 8px; color:#d53f8c; font-weight:bold;">${ba.afterWinRate.toFixed(1)}%</td>
+                  <td style="text-align:right; padding:6px 0; color:${winrateImprovement >= 0 ? 'var(--long)' : 'var(--short)'}; font-weight:bold;">
+                    ${winrateImprovement >= 0 ? '+' : ''}${winrateImprovement.toFixed(1)}%
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:6px 0;">Ausgeführte Trades</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.beforeTrades}</td>
+                  <td style="text-align:right; padding:6px 8px;">${ba.afterTrades}</td>
+                  <td style="text-align:right; padding:6px 0; color:#ffb020;">
+                    -${ba.vetoedTrades} blockiert (${blockedPct}%)
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        `;
       }
 
       return `
         <tr class="clickable lb-toggle-row" data-target="${rowId}">
-          <td style="font-weight: bold; color: ${scoreColor};" title="${item.rawScore !== undefined ? 'Roh-Score: ' + item.rawScore : ''}">${item.score}</td>
+          <td style="font-weight: bold; color: ${scoreColor};" title="${item.rawScore !== undefined ? 'Roh-Score: ' + item.rawScore : ''}">${displayScore}</td>
           <td style="font-size: 8px; white-space: nowrap; letter-spacing: 0.3px;">${badgeParts.join(' ')}</td>
           <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(rules)} ▾</td>
           <td>${item.params.leverage}x</td>
@@ -745,10 +1124,11 @@ App.UI = {
             <div>LONG: <strong>${longRuleText || '–'}</strong></div>
             <div style="margin-bottom:8px;">SHORT: <strong>${shortRuleText || '–'}</strong></div>
             <div style="font-weight:600; margin-bottom:4px;">Validierung:</div>
-            ${item.rawScore !== undefined && item.rawScore !== item.score ? `<div style="color:#9f7aea;">Deflated Score: ${item.score} (Roh-Score: ${item.rawScore}, Korrektur für ${Object.keys(App.state.optimizerDb).length} getestete Kombinationen)</div>` : ''}
+            ${item.rawScore !== undefined && item.rawScore !== item.score ? `<div style="color:#9f7aea;">Deflated Score: ${item.score} (Roh-Score: ${item.rawScore}, Abschlag von ${Math.round(App.Optimizer.deflatedScorePenalty(Object.keys(App.state.optimizerDb).length) * 100)}% für ${Object.keys(App.state.optimizerDb).length} getestete Kombinationen)</div>` : ''}
             ${validationDetailHtml}
-            ${item.veto && item.veto.enabled !== false && item.veto.codes && item.veto.codes.length > 0 ? `<div style="margin-top:6px; color: var(--teal);">🛡 Fine-Tune-Filter gespeichert: ${(item.veto.patterns || []).map(p => p.label).join(', ')}</div>` : ''}
-            <button type="button" class="backtest-btn lb-apply-btn" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}" data-rules='${JSON.stringify(rules)}' style="margin-top:10px; width:100%;">✓ Diese Einstellung übernehmen (Regeln + Parameter)</button>
+            ${mlPerformanceHtml}
+            ${vetoPerformanceHtml}
+            <button type="button" class="backtest-btn lb-apply-btn" data-lev="${item.params.leverage}" data-cooldown="${item.params.cooldownMin}" data-tp="${item.params.tpPercent}" data-sl="${item.params.slPercent}" data-max-open="${item.params.maxOpen || 1}" data-rules='${JSON.stringify(rules)}' data-apply-idx="${idx}" style="margin-top:10px; width:100%;">✓ Vollständiges Profil übernehmen (Regeln + Parameter${hasVeto ? ' + Veto-Filter' : ''}${hasMl ? ' + ML-Modell' : ''})</button>
             <button type="button" class="backtest-btn lb-analyze-btn" data-idx="${idx}" style="margin-top:6px; width:100%; background:transparent; border:1px dashed var(--border); color:var(--text-dim);">🔍 Verlust-Trades analysieren</button>
             <div id="lb-analysis-${idx}" style="margin-top:8px;"></div>
           </td>
@@ -779,6 +1159,8 @@ App.UI = {
         const tp = parseFloat(btn.dataset.tp);
         const sl = parseFloat(btn.dataset.sl);
         const maxOpen = parseInt(btn.dataset.maxOpen || '1');
+        const applyIdx = parseInt(btn.dataset.applyIdx);
+        const item = list[applyIdx];
 
         document.getElementById('bot-lev').value = lev;
         document.getElementById('bot-cooldown').value = cooldown;
@@ -798,6 +1180,25 @@ App.UI = {
         App.state.bot.slPercent = sl;
         App.state.bot.maxOpen = maxOpen;
 
+        // Copy veto filter profile if the leaderboard entry has one
+        if (item && item.veto && item.veto.enabled !== false && item.veto.codes && item.veto.codes.length > 0) {
+          App.state.bot.veto = { enabled: true, codes: [...item.veto.codes], vetoedCount: 0 };
+        } else {
+          App.state.bot.veto = { enabled: false, codes: [], vetoedCount: 0 };
+        }
+
+        // Copy ML model if the leaderboard entry has one
+        if (item && item.mlVeto && item.mlVeto.model) {
+          App.state.bot.mlVeto = {
+            enabled: true,
+            model: item.mlVeto.model,
+            threshold: item.mlVeto.threshold || 0.6,
+            vetoedCount: 0
+          };
+        } else {
+          App.state.bot.mlVeto = { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 };
+        }
+
         let ruleLabel = '';
         try {
           const rules = JSON.parse(btn.dataset.rules);
@@ -813,9 +1214,22 @@ App.UI = {
           console.error('Konnte Regeln des Leaderboard-Eintrags nicht anwenden:', err);
         }
 
+        // Track which strategy profile was applied for provenance display
+        const profileLabel = item ? App.Optimizer.getRuleLabel(item.params.rules) : 'Manuell';
+        App.state.activeStrategyProfile = {
+          testId: item ? item.testId : null,
+          label: profileLabel,
+          appliedAt: Date.now()
+        };
+
         App.Bot.renderBotUI();
         App.saveToLocalStorage();
-        App.UI.showToast(`Übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}`);
+
+        const extras = [];
+        if (App.state.bot.veto.enabled) extras.push('Veto-Filter');
+        if (App.state.bot.mlVeto.enabled) extras.push('ML-Modell');
+        const extraStr = extras.length > 0 ? ` + ${extras.join(' + ')}` : '';
+        App.UI.showToast(`Übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}${extraStr}`);
       });
     });
   },
