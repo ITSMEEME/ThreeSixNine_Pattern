@@ -47,7 +47,9 @@ App.state = {
   // Lets the UI show "loaded from Leaderboard #X" vs "manually configured".
   activeStrategyProfile: { testId: null, label: 'Manuell', appliedAt: null },
   // Selected IndexedDB keys for multi-dataset optimization
-  optimizerDatasets: []
+  optimizerDatasets: [],
+  // Persistent list of manually verified and saved strategy profiles
+  savedProfiles: []
 };
 
 // Set initial balance from config once loaded
@@ -150,7 +152,8 @@ App.saveToLocalStorage = () => {
       bot: App.state.bot,
       rules: App.state.rules,
       activeStrategyProfile: App.state.activeStrategyProfile,
-      optimizerDatasets: App.state.optimizerDatasets
+      optimizerDatasets: App.state.optimizerDatasets,
+      savedProfiles: App.state.savedProfiles
     }));
     // Save optimizer database separately to prevent it from being cleared on simulation reset
     localStorage.setItem('paper-perp-optimizer-db', JSON.stringify(App.state.optimizerDb));
@@ -302,15 +305,18 @@ App.applyLoadedState = (data, silent) => {
 
   App.state.activeStrategyProfile = data.activeStrategyProfile ?? { testId: null, label: 'Manuell', appliedAt: null };
   App.state.optimizerDatasets = data.optimizerDatasets ?? [];
-  App.state.optimizerDb = data.optimizerDb ?? {};
+  App.state.savedProfiles = data.savedProfiles ?? [];
+  if (data.optimizerDb !== undefined) App.state.optimizerDb = data.optimizerDb;
 
-  if (App.UI && App.UI.renderAll) {
-    App.UI.renderAll();
-    App.UI.syncUIFromState();
-    if (App.UI.renderLeaderboard) App.UI.renderLeaderboard('all');
-    if (App.UI.renderHeatmaps) App.UI.renderHeatmaps();
-    if (App.UI.renderWissensstand) App.UI.renderWissensstand();
-    if (App.UI.syncResultsVisibility) App.UI.syncResultsVisibility();
+  if (!silent) {
+    if (App.UI && App.UI.renderAll) {
+      App.UI.renderAll();
+      App.UI.syncUIFromState();
+      if (App.UI.renderLeaderboard) App.UI.renderLeaderboard('all');
+      if (App.UI.renderHeatmaps) App.UI.renderHeatmaps();
+      if (App.UI.renderWissensstand) App.UI.renderWissensstand();
+      if (App.UI.syncResultsVisibility) App.UI.syncResultsVisibility();
+    }
   }
   if (App.Chart && App.Chart.updateLiqLines) {
     App.Chart.updateLiqLines();

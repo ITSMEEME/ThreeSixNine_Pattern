@@ -671,6 +671,20 @@ App.UI = {
       updateBacktestUnusedParamsState();
     }
 
+    const optModeSelect = document.getElementById('optimizer-mode');
+    if (optModeSelect) {
+      optModeSelect.addEventListener('change', () => {
+        const isMart = optModeSelect.value === 'martingale';
+        if (btMartCb) {
+          btMartCb.checked = isMart;
+          if (btMartLimitWrap) {
+            btMartLimitWrap.style.display = isMart ? 'flex' : 'none';
+          }
+          updateBacktestUnusedParamsState();
+        }
+      });
+    }
+
     const applyPreset = (preset) => {
       if (preset === '1m') {
         App.state.strategyMatrix = {
@@ -778,6 +792,14 @@ App.UI = {
       });
     }
 
+    // Robust combinations min datasets filter event
+    const robustMinDsEl = document.getElementById('robust-min-datasets');
+    if (robustMinDsEl) {
+      robustMinDsEl.addEventListener('change', () => {
+        this.renderRobustCombinations();
+      });
+    }
+
     // Reset Optimizer DB event
     const resetOptDbBtn = document.getElementById('btn-reset-optimizer-db');
     if (resetOptDbBtn) {
@@ -788,7 +810,11 @@ App.UI = {
           this.renderLeaderboard('all');
           this.renderHeatmaps();
           this.renderWissensstand();
+          this.renderRobustCombinations();
           this.syncResultsVisibility();
+          if (App.Backtest && typeof App.Backtest.renderCacheList === 'function') {
+            App.Backtest.renderCacheList();
+          }
           App.UI.showToast('Lernspeicher gelöscht. Kerzen-Cache bleibt erhalten.');
         }
       });
@@ -889,6 +915,132 @@ App.UI = {
     }
   },
 
+  renderSavedProfiles() {
+    const tbody = document.querySelector('#table-saved-profiles tbody');
+    if (!tbody) return;
+
+    const profiles = App.state.savedProfiles || [];
+    if (profiles.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:var(--text-faint); font-size:11px; padding:16px 0;">Keine gespeicherten Profile vorhanden. Führen Sie einen Backtest aus und speichern Sie das Profil.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = profiles.map(p => {
+      const modeText = p.martingaleEnabled ? 'Martingale' : 'ML-Filter';
+      const modeClass = p.martingaleEnabled ? 'short' : 'long';
+      const limitText = p.martingaleEnabled ? `${p.martingaleLimit}x` : '—';
+      
+      const dsLabel = (p.datasetRange && p.datasetRange.label) ? p.datasetRange.label : '';
+      const dsTag = dsLabel ? `<div style="font-size:8px; color:var(--text-faint); margin-top:2.5px; font-weight:normal;">📅 ${dsLabel}</div>` : '';
+      
+      return `
+        <tr data-profile-id="${p.id}">
+          <td style="font-weight: 700; color: var(--text);">${p.name}${dsTag}</td>
+          <td><span class="side ${modeClass}" style="padding: 2px 5px; border-radius: 3px; font-size: 9px; font-weight: 700;">${modeText}</span></td>
+          <td>${p.leverage}x</td>
+          <td>${p.tpPercent}%</td>
+          <td>${p.slPercent}%</td>
+          <td>${p.cooldownMin}m</td>
+          <td>${limitText}</td>
+          <td>
+            <div style="display: flex; gap: 4px;">
+              <button class="backtest-btn btn-apply-saved-bt" style="margin: 0; font-size: 9px; padding: 2px 6px; background: var(--surface); border: 1px solid var(--border);" title="Im Backtest laden und ausführen">Backtest</button>
+              <button class="backtest-btn btn-apply-saved-live" style="margin: 0; font-size: 9px; padding: 2px 6px; background: var(--teal); color: #000; border: none; font-weight:700;" title="Auf Live-Bot anwenden">Live-Bot</button>
+              <button class="backtest-btn btn-delete-saved" style="margin: 0; font-size: 9px; padding: 2px 6px; background: rgba(255,92,92,0.1); color: var(--short); border: 1px solid rgba(255,92,92,0.25);" title="Profil löschen">Löschen</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    // Attach event listeners to the buttons in the table
+    tbody.querySelectorAll('.btn-apply-saved-bt').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const tr = e.target.closest('tr');
+        const id = tr.dataset.profileId;
+        const profile = profiles.find(p => p.id === id);
+        if (profile) {
+          // Transfer to backtest inputs
+          const cap = document.getElementById('backtest-capital');
+          const qty = document.getElementById('backtest-qty');
+          const lev = document.getElementById('backtest-lev');
+          const cd = document.getElementById('backtest-cooldown');
+          const mo = document.getElementById('backtest-max-open');
+          const tp = document.getElementById('backtest-tp');
+          const sl = document.getElementById('backtest-sl');
+          const mart = document.getElementById('backtest-martingale-enabled');
+          const martLim = document.getElementById('backtest-martingale-limit');
+
+          if (qty) qty.value = profile.qtyUsd;
+          if (lev) lev.value = profile.leverage;
+          if (cd) cd.value = profile.cooldownMin;
+          if (mo) mo.value = profile.maxOpen;
+          if (tp) tp.value = profile.tpPercent;
+          if (sl) sl.value = profile.slPercent;
+          if (mart) {
+            mart.checked = profile.martingaleEnabled;
+            mart.dispatchEvent(new Event('change'));
+          }
+          if (martLim) martLim.value = profile.martingaleLimit || '8';
+
+          // Apply rules
+          App.state.rules = JSON.parse(JSON.stringify(profile.rules));
+          App.UI.renderStrategyMatrix();
+          App.saveToLocalStorage();
+
+          // Auto run backtest
+          const runBtn = document.getElementById('btn-run-backtest');
+          if (runBtn) runBtn.click();
+          App.UI.showToast(`Profil "${profile.name}" im Backtest geladen & gestartet!`);
+        }
+      });
+    });
+
+    tbody.querySelectorAll('.btn-apply-saved-live').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const tr = e.target.closest('tr');
+        const id = tr.dataset.profileId;
+        const profile = profiles.find(p => p.id === id);
+        if (profile) {
+          // Transfer to live bot settings
+          App.state.bot.qtyUsd = profile.qtyUsd;
+          App.state.bot.leverage = profile.leverage;
+          App.state.bot.cooldownMin = profile.cooldownMin;
+          App.state.bot.maxOpen = profile.maxOpen;
+          App.state.bot.tpPercent = profile.tpPercent;
+          App.state.bot.slPercent = profile.slPercent;
+          
+          if (!App.state.bot.martingale) App.state.bot.martingale = { enabled: false, maxMultiplier: 8, currentStep: 0 };
+          App.state.bot.martingale.enabled = profile.martingaleEnabled;
+          App.state.bot.martingale.maxMultiplier = profile.martingaleLimit || 8;
+
+          // Apply rules
+          App.state.rules = JSON.parse(JSON.stringify(profile.rules));
+          App.UI.renderStrategyMatrix();
+          
+          // Re-render bot UI
+          App.Bot.renderBotUI();
+          App.saveToLocalStorage();
+          App.UI.showToast(`✅ Profil "${profile.name}" erfolgreich auf Live-Bot übertragen!`);
+        }
+      });
+    });
+
+    tbody.querySelectorAll('.btn-delete-saved').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const tr = e.target.closest('tr');
+        const id = tr.dataset.profileId;
+        const profile = profiles.find(p => p.id === id);
+        if (profile && confirm(`Möchten Sie das Profil "${profile.name}" wirklich löschen?`)) {
+          App.state.savedProfiles = App.state.savedProfiles.filter(p => p.id !== id);
+          App.saveToLocalStorage();
+          App.UI.showToast(`Profil "${profile.name}" gelöscht.`);
+          this.renderSavedProfiles();
+        }
+      });
+    });
+  },
+
   renderLeaderboard(filterRegime = 'all') {
     let list = App.Optimizer.getLeaderboard(filterRegime);
     const tbody = document.querySelector('#table-optimizer-leaderboard tbody');
@@ -902,7 +1054,7 @@ App.UI = {
     const viewMode = document.getElementById('leaderboard-view-mode')?.value || 'profiles';
     
     if (viewMode === 'profiles') {
-      // Top 10 completed strategy profiles
+      // Top 20 completed strategy profiles
       let profileList = list.filter(item => (item.mlVeto && item.mlVeto.model) || (item.veto && item.veto.enabled));
       
       let showFallbackMsg = false;
@@ -917,12 +1069,12 @@ App.UI = {
         return scoreB - scoreA;
       });
       
-      list = profileList.slice(0, 10);
+      list = profileList.slice(0, 20);
       
       if (showFallbackMsg && App.Optimizer.state.isRunning === false) {
         // Only show toast once if needed, to avoid spam
         if (!this._fallbackToastShown) {
-          App.UI.showToast('Bislang keine optimierten ML-Veto-Profile verfügbar. Zeige Top 10 Standard-Kandidaten.', true);
+          App.UI.showToast('Bislang keine optimierten ML-Veto-Profile verfügbar. Zeige Top 20 Standard-Kandidaten.', true);
           this._fallbackToastShown = true;
         }
       }
@@ -938,6 +1090,19 @@ App.UI = {
 
       const v = item.validation || {};
       const badgeParts = [];
+      
+      let dsLabel = 'unbekannt';
+      if (item.datasetRange) {
+        if (item.datasetRange.label) {
+          dsLabel = item.datasetRange.label;
+        } else if (item.datasetRange.fromTime && item.datasetRange.toTime) {
+          dsLabel = `${App.Backtest.formatDateShort(item.datasetRange.fromTime)}–${App.Backtest.formatDateShort(item.datasetRange.toTime)}`;
+        }
+      }
+      if (dsLabel !== 'unbekannt') {
+        badgeParts.push(`<span style="color:#a0aec0; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); border-radius:3px; padding:0 3px; font-size:7px;" title="Optimierungs-Datensatz: ${dsLabel}">📅 ${dsLabel}</span>`);
+      }
+
       if (v.validated) {
         const gap = v.trainScore - v.testScore;
         const oosColor = gap <= 15 ? 'var(--long)' : gap <= 30 ? '#ffb020' : 'var(--short)';
@@ -967,6 +1132,15 @@ App.UI = {
         const total = Object.keys(App.state.optimizerDb).length;
         const penaltyPct = Math.round(App.Optimizer.deflatedScorePenalty(total) * 100);
         badgeParts.push(`<span style="color:#9f7aea;" title="Deflated Score (Roh: ${item.rawScore}, Abschlag: ${penaltyPct}%)">DSR</span>`);
+      }
+
+      if (item.results.sortinoRatio !== undefined) {
+        const sortColor = item.results.sortinoRatio >= 2.0 ? 'var(--long)' : item.results.sortinoRatio >= 1.0 ? '#ffb020' : 'var(--text-dim)';
+        badgeParts.push(`<span style="color:${sortColor}; font-size:7px; padding:0 3px; border:1px solid ${sortColor}; border-radius:3px;" title="Sortino Ratio (Downside Risk): ${item.results.sortinoRatio.toFixed(2)}">Sortino ${item.results.sortinoRatio.toFixed(1)}</span>`);
+      }
+      if (item.results.wfeScore !== undefined) {
+        const wfeColor = item.results.wfeScore >= 70 ? 'var(--long)' : item.results.wfeScore >= 30 ? '#ffb020' : 'var(--short)';
+        badgeParts.push(`<span style="color:${wfeColor}; font-size:7px; padding:0 3px; border:1px solid ${wfeColor}; border-radius:3px;" title="Walk-Forward Efficiency (Out-of-Sample Score): ${item.results.wfeScore.toFixed(0)}%">WFE ${item.results.wfeScore.toFixed(0)}%</span>`);
       }
 
       const rowId = `lb-row-${idx}`;
@@ -1162,6 +1336,21 @@ App.UI = {
         const applyIdx = parseInt(btn.dataset.applyIdx);
         const item = list[applyIdx];
 
+        const isMart = item && item.params && item.params.martingaleEnabled;
+
+        // Apply Martingale settings to inputs
+        const botMartCb = document.getElementById('bot-martingale-enabled');
+        const btMartCb = document.getElementById('backtest-martingale-enabled');
+
+        if (botMartCb) {
+          botMartCb.checked = !!isMart;
+          botMartCb.dispatchEvent(new Event('change'));
+        }
+        if (btMartCb) {
+          btMartCb.checked = !!isMart;
+          btMartCb.dispatchEvent(new Event('change'));
+        }
+
         document.getElementById('bot-lev').value = lev;
         document.getElementById('bot-cooldown').value = cooldown;
         document.getElementById('bot-tp-pct').value = tp;
@@ -1179,6 +1368,9 @@ App.UI = {
         App.state.bot.tpPercent = tp;
         App.state.bot.slPercent = sl;
         App.state.bot.maxOpen = maxOpen;
+
+        if (!App.state.bot.martingale) App.state.bot.martingale = { enabled: false, maxMultiplier: 8, currentStep: 0 };
+        App.state.bot.martingale.enabled = !!isMart;
 
         // Copy veto filter profile if the leaderboard entry has one
         if (item && item.veto && item.veto.enabled !== false && item.veto.codes && item.veto.codes.length > 0) {
@@ -1635,7 +1827,36 @@ App.UI = {
       .map(([name, v]) => `<div style="display:flex; justify-content:space-between; margin-bottom:2px;"><span>${App.TradeAnalyzer.ML_FEATURE_LABELS[name] || name}</span><span style="color:${statusColor(v.status)};">${statusLabel(v.status)} (${v.significantCount}/${v.totalEpochs}, ${v.distinctPhases} Phasen)</span></div>`)
       .join('');
 
+    const kmModel = lib.kmeansRegimes;
+    const kmStatusHtml = kmModel ? `
+      <div style="padding:4px 6px; background:rgba(0,224,184,0.08); border:1px solid rgba(0,224,184,0.2); border-radius:4px; margin-bottom:6px;">
+        <span style="color:#00e0b8; font-weight:bold;">🔵 K-Means Marktregime:</span> Aktiv (${kmModel.samplesCount || 0} Fenster trainiert ${App.formatRelativeTime(kmModel.trainedAt)})
+      </div>
+    ` : `
+      <div style="padding:4px 6px; background:rgba(255,255,255,0.03); border:1px solid var(--border-soft); border-radius:4px; margin-bottom:6px; color:var(--text-faint);">
+        🔵 K-Means Marktregime: Noch nicht trainiert (wird beim Optimizer-Start gelernt)
+      </div>
+    `;
+
+    const dbscanStats = App.Optimizer.getWissensstand();
+    const dbscanStatusHtml = `
+      <div style="padding:4px 6px; background:rgba(159,122,234,0.08); border:1px solid rgba(159,122,234,0.2); border-radius:4px; margin-bottom:6px;">
+        <span style="color:#b794f4; font-weight:bold;">🟣 DBSCAN Parameter-Dichte:</span> Aktiv (${dbscanStats.goodClusters} Cluster, ${dbscanStats.exclusionPercent}% Suchraumausschluss)
+      </div>
+    `;
+
+    const pcaStatusHtml = `
+      <div style="padding:4px 6px; background:rgba(110,180,255,0.08); border:1px solid rgba(110,180,255,0.2); border-radius:4px; margin-bottom:8px;">
+        <span style="color:#6eb4ff; font-weight:bold;">🟢 PCA Dimensionsreduktion:</span> Aktiv (5 Indikator-Features ➔ 3 Hauptkomponenten)
+      </div>
+    `;
+
     contentEl.innerHTML = `
+      <div style="margin-bottom:8px; font-size:10px;">
+        ${dbscanStatusHtml}
+        ${kmStatusHtml}
+        ${pcaStatusHtml}
+      </div>
       ${ruleRows ? `<div style="color:var(--text-faint); margin-bottom:2px;">Regelbasierte Muster:</div>${ruleRows}` : ''}
       ${mlRows ? `<div style="color:var(--text-faint); margin: 6px 0 2px;">ML-Merkmale:</div>${mlRows}` : ''}
     `;
@@ -1692,7 +1913,7 @@ App.UI = {
         document.querySelectorAll('.res-tab').forEach(x => {
           x.classList.toggle('active', x.dataset.resTab === 'leaderboard');
         });
-        ['trades', 'leaderboard', 'heatmaps', 'wissensstand'].forEach(name => {
+        ['trades', 'saved-profiles', 'leaderboard', 'heatmaps', 'wissensstand', 'robust-combinations'].forEach(name => {
           const el = document.getElementById('res-tab-' + name);
           if (el) el.style.display = (name === 'leaderboard') ? 'block' : 'none';
         });
@@ -1706,5 +1927,243 @@ App.UI = {
         if (contentEl) contentEl.style.display = 'none';
       }
     }
+    this.renderRobustCombinations();
+  },
+
+  renderRobustCombinations() {
+    const minDsSelect = document.getElementById('robust-min-datasets');
+    const minDatasets = minDsSelect ? parseInt(minDsSelect.value) : 2;
+
+    const tbody = document.querySelector('#table-robust-combinations tbody');
+    if (!tbody) return;
+
+    const db = App.state.optimizerDb || {};
+    const combos = {};
+
+    for (const key in db) {
+      const entry = db[key];
+      if (!entry || !entry.params) continue;
+
+      const p = entry.params;
+      const rules = p.rules || { long: [], short: [] };
+      const rulesSig = App.Optimizer.getRulesSignature(rules);
+      
+      const comboKey = `${entry.market || 'BTC'}_${rulesSig}_${p.leverage}_${p.cooldownMin}_${p.tpPercent}_${p.slPercent}_${p.maxOpen || 1}_${p.martingaleEnabled ? 1 : 0}`;
+
+      if (!combos[comboKey]) {
+        combos[comboKey] = {
+          params: p,
+          market: entry.market || 'BTC',
+          timeframe: entry.timeframe || '1m',
+          entries: []
+        };
+      }
+      combos[comboKey].entries.push(entry);
+    }
+
+    const robustList = [];
+
+    for (const key in combos) {
+      const combo = combos[key];
+      
+      const datasetKeys = new Set();
+      const uniqueEntries = [];
+      for (const entry of combo.entries) {
+        if (!entry.datasetRange) continue;
+        const dsKey = `${entry.datasetRange.fromTime}_${entry.datasetRange.toTime}`;
+        if (!datasetKeys.has(dsKey)) {
+          datasetKeys.add(dsKey);
+          uniqueEntries.push(entry);
+        }
+      }
+
+      if (uniqueEntries.length < minDatasets) continue;
+
+      const allSuccessful = uniqueEntries.every(e => e.results && e.results.totalReturnPercent > 0);
+      if (!allSuccessful) continue;
+
+      let totalScore = 0;
+      let totalReturn = 0;
+      let minReturn = Infinity;
+      let totalWinrate = 0;
+      let maxDrawdown = -Infinity;
+      let totalTrades = 0;
+
+      for (const entry of uniqueEntries) {
+        const score = (entry.postMlScore !== null && entry.postMlScore !== undefined) ? entry.postMlScore : entry.score;
+        totalScore += score;
+        totalReturn += entry.results.totalReturnPercent;
+        if (entry.results.totalReturnPercent < minReturn) {
+          minReturn = entry.results.totalReturnPercent;
+        }
+        totalWinrate += entry.results.winRatePercent;
+        if (entry.results.maxDrawdownPercent > maxDrawdown) {
+          maxDrawdown = entry.results.maxDrawdownPercent;
+        }
+        totalTrades += entry.results.totalTrades;
+      }
+
+      const count = uniqueEntries.length;
+      robustList.push({
+        params: combo.params,
+        market: combo.market,
+        timeframe: combo.timeframe,
+        uniqueEntries: uniqueEntries,
+        avgScore: totalScore / count,
+        avgReturn: totalReturn / count,
+        minReturn: minReturn,
+        avgWinrate: totalWinrate / count,
+        maxDrawdown: maxDrawdown,
+        avgTrades: totalTrades / count
+      });
+    }
+
+    if (robustList.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 16px 0;">Keine robusten Kombinationen gefunden, die die Kriterien erfüllen.</td></tr>`;
+      return;
+    }
+
+    robustList.sort((a, b) => {
+      if (b.avgScore !== a.avgScore) {
+        return b.avgScore - a.avgScore;
+      }
+      return b.avgReturn - a.avgReturn;
+    });
+
+    tbody.innerHTML = robustList.map((combo, idx) => {
+      const rules = combo.params.rules || { long: [], short: [] };
+      const avgScore = combo.avgScore;
+      const scoreColor = avgScore >= 80 ? 'var(--long)' : avgScore >= 50 ? '#ffb020' : 'var(--short)';
+      const avgReturnCls = combo.avgReturn >= 0 ? 'long' : 'short';
+      const minReturnCls = combo.minReturn >= 0 ? 'long' : 'short';
+      const rowId = `robust-detail-${idx}`;
+      
+      const datasetsListHtml = combo.uniqueEntries.map(e => {
+        let dsLabel = 'unbekannt';
+        if (e.datasetRange) {
+          if (e.datasetRange.label) {
+            dsLabel = e.datasetRange.label;
+          } else if (e.datasetRange.fromTime && e.datasetRange.toTime) {
+            dsLabel = `${App.Backtest.formatDateShort(e.datasetRange.fromTime)}–${App.Backtest.formatDateShort(e.datasetRange.toTime)}`;
+          }
+        }
+        const retCls = e.results.totalReturnPercent >= 0 ? 'color:var(--long)' : 'color:var(--short)';
+        const score = (e.postMlScore !== null && e.postMlScore !== undefined) ? e.postMlScore : e.score;
+        return `<div style="display:flex; justify-content:space-between; padding:4px 8px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:4px; margin-bottom:4px;">
+          <span style="color:var(--text-dim);">📅 ${dsLabel} (${e.marketClass?.regime || 'Seitwärts'})</span>
+          <span>Rendite: <strong style="${retCls}">${e.results.totalReturnPercent >= 0 ? '+' : ''}${e.results.totalReturnPercent.toFixed(2)}%</strong> | Winrate: <strong>${e.results.winRatePercent.toFixed(1)}%</strong> | MaxDD: <strong style="color:var(--short);">${e.results.maxDrawdownPercent.toFixed(1)}%</strong> | Score: <strong>${score}</strong></span>
+        </div>`;
+      }).join('');
+
+      return `
+        <tr class="clickable robust-toggle-row" data-target="${rowId}">
+          <td style="font-weight: bold; color: ${scoreColor};">${avgScore.toFixed(0)}</td>
+          <td><span style="color:#a0aec0; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); border-radius:3px; padding:1px 4px; font-size:9px;">${combo.uniqueEntries.length} Datensätze</span></td>
+          <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(rules)} ▾</td>
+          <td>${combo.params.leverage}x</td>
+          <td>${combo.params.cooldownMin}m</td>
+          <td>${combo.params.tpPercent}%</td>
+          <td>${combo.params.slPercent}%</td>
+          <td>${combo.params.maxOpen || 1}</td>
+          <td class="side ${avgReturnCls}">+${combo.avgReturn.toFixed(2)}%</td>
+          <td class="side ${minReturnCls}">+${combo.minReturn.toFixed(2)}%</td>
+          <td>${combo.avgWinrate.toFixed(1)}%</td>
+          <td class="side short">${combo.maxDrawdown.toFixed(2)}%</td>
+        </tr>
+        <tr id="${rowId}" class="robust-detail-row" style="display:none;">
+          <td colspan="12" style="background: var(--surface-3); padding: 10px; font-size: 10px; line-height: 1.6;">
+            <div style="font-weight:600; margin-bottom:6px; color:var(--text-dim);">Ergebnisse in den einzelnen Datensätzen:</div>
+            <div style="margin-bottom:8px;">${datasetsListHtml}</div>
+            
+            <button type="button" class="backtest-btn robust-apply-btn" 
+              data-lev="${combo.params.leverage}" 
+              data-cooldown="${combo.params.cooldownMin}" 
+              data-tp="${combo.params.tpPercent}" 
+              data-sl="${combo.params.slPercent}" 
+              data-max-open="${combo.params.maxOpen || 1}" 
+              data-rules='${JSON.stringify(rules)}' 
+              data-martingale="${!!combo.params.martingaleEnabled}"
+              style="margin-top:4px; width:100%;">
+              ✓ Parameter auf Bot & Backtest anwenden
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('.robust-toggle-row').forEach(tr => {
+      tr.addEventListener('click', () => {
+        const detail = document.getElementById(tr.dataset.target);
+        if (detail) detail.style.display = detail.style.display === 'none' ? 'table-row' : 'none';
+      });
+    });
+
+    tbody.querySelectorAll('.robust-apply-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const lev = parseFloat(btn.dataset.lev);
+        const cooldown = parseFloat(btn.dataset.cooldown);
+        const tp = parseFloat(btn.dataset.tp);
+        const sl = parseFloat(btn.dataset.sl);
+        const maxOpen = parseInt(btn.dataset.maxOpen || '1');
+        const rules = JSON.parse(btn.dataset.rules);
+        const isMart = btn.dataset.martingale === 'true';
+
+        const botMartCb = document.getElementById('bot-martingale-enabled');
+        const btMartCb = document.getElementById('backtest-martingale-enabled');
+
+        if (botMartCb) {
+          botMartCb.checked = isMart;
+          botMartCb.dispatchEvent(new Event('change'));
+        }
+        if (btMartCb) {
+          btMartCb.checked = isMart;
+          btMartCb.dispatchEvent(new Event('change'));
+        }
+
+        document.getElementById('bot-lev').value = lev;
+        document.getElementById('bot-cooldown').value = cooldown;
+        document.getElementById('bot-tp-pct').value = tp;
+        document.getElementById('bot-sl-pct').value = sl;
+        document.getElementById('bot-max-open').value = maxOpen;
+
+        document.getElementById('backtest-lev').value = lev;
+        document.getElementById('backtest-cooldown').value = cooldown;
+        document.getElementById('backtest-tp').value = tp;
+        document.getElementById('backtest-sl').value = sl;
+        document.getElementById('backtest-max-open').value = maxOpen;
+
+        App.state.bot.leverage = lev;
+        App.state.bot.cooldownMin = cooldown;
+        App.state.bot.tpPercent = tp;
+        App.state.bot.slPercent = sl;
+        App.state.bot.maxOpen = maxOpen;
+
+        if (!App.state.bot.martingale) App.state.bot.martingale = { enabled: false, maxMultiplier: 8, currentStep: 0 };
+        App.state.bot.martingale.enabled = isMart;
+
+        App.state.bot.veto = { enabled: false, codes: [], vetoedCount: 0 };
+        App.state.bot.mlVeto = { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 };
+
+        App.state.rules = rules;
+        App.UI.renderRules();
+        const ruleLabel = `, Regeln=${App.Optimizer.getRuleLabel(rules)}`;
+
+        App.API.loadActiveIntervalsHistory().then(() => {
+          App.API.connectWs(App.state.timeframe);
+        });
+
+        const profileLabel = App.Optimizer.getRuleLabel(rules);
+        App.state.activeStrategyProfile = {
+          testId: null,
+          label: profileLabel,
+          appliedAt: Date.now()
+        };
+
+        App.Bot.renderBotUI();
+        App.saveToLocalStorage();
+        App.UI.showToast(`Übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}`);
+      });
+    });
   }
 };

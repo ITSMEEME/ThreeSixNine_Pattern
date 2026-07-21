@@ -562,8 +562,11 @@
                 
                 <!-- Multi-Dataset selection for Optimizer -->
                 <div style="font-size: 9px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px;">📂 Für Optimierung genutzte Datensätze</div>
-                <div id="optimizer-datasets-selection" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; max-height: 120px; overflow-y: auto; padding-right: 4px;">
+                <div id="optimizer-datasets-selection" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; max-height: 120px; overflow-y: auto; padding-right: 4px;">
                   <!-- Dynamically populated from IndexedDB cache list -->
+                </div>
+                <div id="optimizer-selected-summary" style="font-size: 10px; color: var(--text-dim); margin-bottom: 12px; line-height: 1.4; padding: 6px 8px; border-radius: 4px; background: rgba(255,255,255,0.02); border: 1px dashed var(--border-soft);">
+                  <!-- Populated dynamically via JS -->
                 </div>
 
                 <div style="background: var(--surface-3); border: 1px solid var(--border-soft); border-radius: 4px; padding: 10px; margin-bottom: 12px; font-family: monospace; font-size: 11px;">
@@ -583,8 +586,31 @@
                     <span>Tests Gesamt:</span>
                     <strong id="opt-total-progress">-</strong>
                   </div>
+                  <!-- Live-Fortschritt & Timer -->
+                  <div id="opt-live-progress-container" style="display: none; margin-top: 10px; border-top: 1px solid var(--border-soft); padding-top: 8px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 10px; color: var(--text-dim);">
+                      <span>Fortschritt:</span>
+                      <span id="opt-live-percent">0.0%</span>
+                    </div>
+                    <div style="background: var(--surface); border-radius: 3px; overflow: hidden; height: 8px; border: 1px solid var(--border-soft); margin-bottom: 6px; position: relative;">
+                      <div id="opt-live-progress-bar" style="background: var(--teal); width: 0%; height: 100%; transition: width 0.3s ease;"></div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 9px; color: var(--text-faint);">
+                      <span>Laufzeit: <span id="opt-live-elapsed">0s</span></span>
+                      <span>Restzeit: <span id="opt-live-eta">—</span></span>
+                    </div>
+                  </div>
                 </div>
                 <div id="opt-validation-info" style="font-size: 9px; color: var(--text-faint); margin-bottom: 12px; line-height: 1.5;"></div>
+
+                <div style="margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
+                  <span style="font-size: 10px; color: var(--text-dim);">Optimierungs-Modus:</span>
+                  <select id="optimizer-mode" style="background: var(--surface-3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 10px; padding: 2px 6px; outline: none; cursor: pointer; font-family: inherit;">
+                    <option value="ml" selected>ML-Filter Modus (Standard)</option>
+                    <option value="ml_high_freq">⚡ High-Frequency ML (Viel ML-Trainingsdaten)</option>
+                    <option value="martingale">Martingale Modus</option>
+                  </select>
+                </div>
 
                 <label style="display:flex; align-items:center; gap:6px; font-size: 10px; color: var(--text-dim); margin-bottom: 6px; cursor: pointer;">
                   <input type="checkbox" id="opt-search-rules" checked>
@@ -596,10 +622,39 @@
                   Automatisches ML-Veto-Training für Top-Kandidaten (Score >= 60)
                 </label>
 
-                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                  <button type="button" id="btn-start-optimizer" class="backtest-btn secondary" style="flex: 2; margin-top: 0;" disabled>Lernen starten</button>
-                  <button type="button" id="btn-stop-optimizer" class="backtest-btn" style="flex: 1; margin-top: 0; background: var(--short); color: white;" disabled>Stopp</button>
+                <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
+                  <button type="button" id="btn-start-automl-pipeline" class="backtest-btn" style="background: linear-gradient(135deg, #7928CA 0%, #FF0080 100%); color: white; font-weight: bold; border: none; padding: 8px 12px; font-size: 11px; display:flex; align-items:center; justify-content:center; gap:6px;">
+                    🤖 Auto-ML Pipeline starten (1-Klick Voll-Optimierung)
+                  </button>
+
+                  <div style="display: flex; gap: 8px;">
+                    <button type="button" id="btn-start-optimizer" class="backtest-btn secondary" style="flex: 2; margin-top: 0;" disabled>Lernen starten</button>
+                    <button type="button" id="btn-stop-optimizer" class="backtest-btn" style="flex: 1; margin-top: 0; background: var(--short); color: white;" disabled>Stopp</button>
+                  </div>
                 </div>
+
+                <!-- Visual Stepper Container for Auto-ML Pipeline -->
+                <div id="automl-stepper-container" style="display: none; margin-bottom: 12px; padding: 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border-soft);">
+                  <div style="font-size: 10px; font-weight: bold; color: var(--teal); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                    <span>🤖 Auto-ML Pipeline Fortschritt</span>
+                    <span id="automl-overall-status" style="color: var(--text-dim); font-size: 9px;">Vorbereitung...</span>
+                  </div>
+                  <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div id="automl-step-1" class="automl-step-card" style="padding: 6px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-soft); font-size: 9px; display: flex; align-items: center; justify-content: space-between;">
+                      <span>⚡ Phase 1: C-Parallel-Search & Out-of-Sample Testing</span>
+                      <span class="step-status" style="color: var(--text-faint);">⏳ Warten</span>
+                    </div>
+                    <div id="automl-step-2" class="automl-step-card" style="padding: 6px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-soft); font-size: 9px; display: flex; align-items: center; justify-content: space-between;">
+                      <span>🔵 Phase 2: Unsupervised ML (K-Means Regimes & DBSCAN)</span>
+                      <span class="step-status" style="color: var(--text-faint);">⏳ Warten</span>
+                    </div>
+                    <div id="automl-step-3" class="automl-step-card" style="padding: 6px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-soft); font-size: 9px; display: flex; align-items: center; justify-content: space-between;">
+                      <span>🟣 Phase 3: Supervised ML (PCA + TensorFlow.js Veto)</span>
+                      <span class="step-status" style="color: var(--text-faint);">⏳ Warten</span>
+                    </div>
+                  </div>
+                </div>
+
                 <button type="button" id="btn-reset-optimizer-db" class="backtest-btn" style="font-size: 9px; padding: 4px; margin-top: 4px; border: 1px dashed var(--border); color: var(--text-dim); background: transparent; width: 100%;" title="Löscht nur die Testergebnisse/Lerndaten — Kerzen-Datensätze bleiben erhalten">Lernspeicher löschen (Kerzen-Cache bleibt erhalten)</button>
               </div>
             </div>
@@ -633,18 +688,21 @@
                   </div>
                 </div>
 
-                <div class="backtest-meta-info" style="font-size: 11px; color: var(--text-dim); margin-top: 10px; font-family: monospace; display: flex; justify-content: space-between; padding: 6px 10px; background: var(--surface-3); border-radius: 4px; border: 1px solid var(--border-soft);">
+                <div class="backtest-meta-info" style="font-size: 11px; color: var(--text-dim); margin-top: 10px; font-family: monospace; display: flex; justify-content: space-between; padding: 6px 10px; background: var(--surface-3); border-radius: 4px; border: 1px solid var(--border-soft); align-items: center;">
                   <span>Trades gesamt: <strong id="res-total-trades">0</strong></span>
                   <span>Gezahlte Gebühren: <strong id="res-total-fees">0 sats</strong></span>
                   <span>Endkapital: <strong id="res-final-balance">0 sats</strong></span>
+                  <button type="button" id="btn-save-current-profile" style="background: var(--teal); border: none; color: #000; padding: 3px 8px; border-radius: 3px; font-weight: 700; cursor: pointer; font-size: 9px; outline:none; transition: opacity 0.15s ease;" disabled>⭐ Profil speichern</button>
                 </div>
 
                 <!-- Sub-tabs for results -->
                 <div class="res-tabs" style="margin-top: 16px;">
                   <button class="res-tab active" data-res-tab="trades">Transaktionen</button>
+                  <button class="res-tab" data-res-tab="saved-profiles">⭐ Gespeicherte Profile</button>
                   <button class="res-tab" data-res-tab="leaderboard">Rangliste (Top 100)</button>
                   <button class="res-tab" data-res-tab="heatmaps">Parameter-Heatmaps</button>
                   <button class="res-tab" data-res-tab="wissensstand">Lernspeicher</button>
+                  <button class="res-tab" data-res-tab="robust-combinations">🛡 Robustheit (Multi-Dataset)</button>
                 </div>
 
                 <!-- Sub-tab content: Trade Log -->
@@ -660,6 +718,29 @@
                           <th>Kurs-Spanne</th>
                           <th>Netto PnL</th>
                           <th>Signale</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <!-- populated dynamically -->
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Sub-tab content: Saved Profiles -->
+                <div class="res-tab-content" id="res-tab-saved-profiles" style="display: none;">
+                  <div style="overflow-x: auto; margin-top: 8px; max-height: 400px; border: 1px solid var(--border); border-radius: 4px;">
+                    <table class="backtest-table" id="table-saved-profiles">
+                      <thead style="position: sticky; top: 0; background: var(--surface-2); z-index: 1;">
+                        <tr>
+                          <th>Name</th>
+                          <th>Modus</th>
+                          <th>Hebel</th>
+                          <th>TP %</th>
+                          <th>SL %</th>
+                          <th>CD (m)</th>
+                          <th>Limit</th>
+                          <th>Aktionen</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -761,6 +842,49 @@
                     <button type="button" id="btn-apply-library" style="margin-top: 8px; width:100%; display:none;" class="backtest-btn">🛡 Bestätigte Bibliothek auf Live-Bot anwenden</button>
                   </div>
                 </div>
+
+                <!-- Sub-tab content: Robustheit (Multi-Dataset) -->
+                <div class="res-tab-content" id="res-tab-robust-combinations" style="display: none;">
+                  <div style="margin-top: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                    <div style="font-size: 10px; color: var(--text-dim);">
+                      Zeigt Parameter-Kombinationen, die in <strong>mehreren Datensätzen profitabel</strong> ("erfolgreich" mit Rendite > 0%) sind.
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span style="font-size: 10px; color: var(--text-dim);">Mindestanzahl Datensätze:</span>
+                      <select id="robust-min-datasets" class="backtest-select-small" style="width: auto; padding: 2px 6px; height: 24px; font-size: 10px;">
+                        <option value="2" selected>2+</option>
+                        <option value="3">3+</option>
+                        <option value="4">4+</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style="overflow-x: auto; max-height: 400px; border: 1px solid var(--border); border-radius: 4px;">
+                    <table class="backtest-table" id="table-robust-combinations">
+                      <thead style="position: sticky; top: 0; background: var(--surface-2); z-index: 1;">
+                        <tr>
+                          <th>Ø Score</th>
+                          <th>Datensätze</th>
+                          <th>Regeln</th>
+                          <th>Hebel</th>
+                          <th>CD</th>
+                          <th>TP %</th>
+                          <th>SL %</th>
+                          <th>Max Pos</th>
+                          <th>Ø Rendite</th>
+                          <th>Min. Rendite</th>
+                          <th>Ø Winrate</th>
+                          <th>Max. DD</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <!-- populated dynamically -->
+                      </tbody>
+                    </table>
+                  </div>
+                  <div style="font-size: 9px; color: var(--text-faint); margin-top: 6px; font-style: italic;">
+                    * Klicke auf eine Zeile, um die detaillierten Einzelergebnisse je Datensatz anzuzeigen und zu übernehmen.
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -776,6 +900,7 @@
 <script src="js/lib/lightweight-charts.js"></script>
 <script src="js/config.js"></script>
 <script src="js/state.js"></script>
+<script src="js/ml-helper.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/indicators.js"></script>
 <script src="js/chart.js"></script>

@@ -109,14 +109,37 @@ App.Engine = {
       const exitFee = this.fee(p.qtyUsd, markPrice, App.CONFIG.feeRate);
       const netPnl = pnl - entryFee - exitFee;
 
+      // Break-Even Protection: Once unrealized net PnL reaches >= 50% of TP target, move SL to Break-Even (0 loss)
+      if (p.tpSats && netPnl >= (p.tpSats * 0.50) && (!p.isBreakEvenActive)) {
+        p.isBreakEvenActive = true;
+        p.slSats = 0; // Move SL to Break-Even (covers entry + exit fees)
+        if (App.UI && App.UI.showToast) {
+          App.UI.showToast(`🛡 Break-Even SL aktiviert für ${p.side === 'long' ? 'Long' : 'Short'} Position!`, false, 2500);
+        }
+      }
+
       if (p.tpSats && netPnl >= p.tpSats) {
         const tpPrice = this.getTpPrice(p.side, p.qtyUsd, p.entryPrice, p.leverage, p.tpSats) || markPrice;
         this.closePosition(p.id, tpPrice, 'tp');
-      } else if (p.slSats && netPnl <= -p.slSats) {
+      } else if (p.slSats !== null && p.slSats !== undefined && netPnl <= -p.slSats) {
         const slPrice = this.getSlPrice(p.side, p.qtyUsd, p.entryPrice, p.leverage, p.slSats) || markPrice;
         this.closePosition(p.id, slPrice, 'sl');
       }
     });
+  },
+
+  calcVolatilitySizing(defaultQtyUsd, candles1m) {
+    if (!candles1m || candles1m.length < 14) return defaultQtyUsd;
+    const recent = candles1m.slice(-14);
+    const ranges = recent.map(c => ((c.high - c.low) / c.open) * 100);
+    const avgVol = ranges.reduce((a, b) => a + b, 0) / ranges.length;
+
+    // Baseline volatility target = 0.35% per 1m candle
+    const targetVol = 0.35;
+    const scaleFactor = targetVol / Math.max(0.1, avgVol);
+    const clampedScale = Math.max(0.4, Math.min(1.8, scaleFactor));
+
+    return Math.round(defaultQtyUsd * clampedScale * 10) / 10;
   },
   
   unrealizedPnl(markPrice){
