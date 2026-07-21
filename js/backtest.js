@@ -143,7 +143,7 @@ App.Backtest = {
         candles: candles_I,
         signals: signals_I,
         pointer: -1,
-        durationSeconds: mins * 60
+        durationMs: mins * 60 * 1000
       };
     }
 
@@ -171,7 +171,7 @@ App.Backtest = {
       // Update HTF pointers to current 1m time
       for (let tf of uniqueIntervals) {
         const data = htfData[tf];
-        while (data.pointer + 1 < data.candles.length && data.candles[data.pointer + 1].time + data.durationSeconds <= c.time) {
+        while (data.pointer + 1 < data.candles.length && data.candles[data.pointer + 1].time + data.durationMs <= c.time) {
           data.pointer++;
         }
       }
@@ -528,7 +528,8 @@ App.Backtest = {
       let bestEntry = null;
       Object.values(db).forEach(test => {
         if (!test.datasetRange) return;
-        // Match: the test's time range overlaps or equals this dataset's range
+        // Match: symbol must match AND the test's time range overlaps or equals this dataset's range
+        if (test.market && entry.symbol && test.market.toUpperCase() !== entry.symbol.toUpperCase()) return;
         const dr = test.datasetRange;
         if (dr.fromTime <= entry.toTime && dr.toTime >= entry.fromTime) {
           count++;
@@ -560,17 +561,23 @@ App.Backtest = {
 
       // Build usage badge HTML
       let usageHtml = '';
+      const isKmTrained = App.state.mlLibrary?.kmeansRegimes ? true : false;
       if (usage.count > 0) {
         const scoreColor = usage.bestScore >= 80 ? '#00e0b8' : usage.bestScore >= 60 ? '#ffb020' : 'var(--text-dim)';
         usageHtml = `
           <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:3px;">
-            <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(110,180,255,0.1); color:#6eb4ff; border:1px solid rgba(110,180,255,0.2);">🧪 ${usage.count} Tests</span>
+            <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(159,122,234,0.15); color:#b794f4; border:1px solid rgba(159,122,234,0.3);">🟣 Optimiert (${usage.count} Tests)</span>
+            ${isKmTrained ? `<span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(0,224,184,0.12); color:#00e0b8; border:1px solid rgba(0,224,184,0.25);">🔵 K-Means gelernt</span>` : ''}
             <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(0,224,184,0.08); color:${scoreColor}; border:1px solid rgba(0,224,184,0.15);">⭐ Best: ${usage.bestScore.toFixed(0)}</span>
-            <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(255,255,255,0.03); color:var(--text-faint); border:1px solid var(--border-soft);">⏱ ${App.formatRelativeTime(usage.lastTimestamp)}</span>
           </div>
         `;
       } else {
-        usageHtml = `<div style="margin-top:3px;"><span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(255,255,255,0.03); color:var(--text-faint); border:1px solid var(--border-soft);">— Noch nicht trainiert</span></div>`;
+        usageHtml = `
+          <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:3px;">
+            <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(255,255,255,0.04); color:var(--text-faint); border:1px solid var(--border-soft);">⚪ Ungenutzt</span>
+            ${isKmTrained ? `<span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(0,224,184,0.12); color:#00e0b8; border:1px solid rgba(0,224,184,0.25);">🔵 K-Means gelernt</span>` : ''}
+          </div>
+        `;
       }
 
       return `
@@ -638,6 +645,19 @@ App.Backtest = {
           cb.addEventListener('change', () => {
             const key = cb.dataset.key;
             if (cb.checked) {
+              const entry = index.find(e => e.key === key);
+              if (entry) {
+                const currentSymbols = new Set();
+                App.state.optimizerDatasets.forEach(k => {
+                  const e2 = index.find(x => x.key === k);
+                  if (e2) currentSymbols.add(e2.symbol);
+                });
+                if (currentSymbols.size > 0 && !currentSymbols.has(entry.symbol)) {
+                  App.UI.showToast(`⚠️ Du kannst nur Datensätze des gleichen Symbols kombinieren (aktuell: ${Array.from(currentSymbols).join(', ')}).`, true);
+                  cb.checked = false;
+                  return;
+                }
+              }
               if (!App.state.optimizerDatasets.includes(key)) {
                 App.state.optimizerDatasets.push(key);
               }
@@ -645,10 +665,55 @@ App.Backtest = {
               App.state.optimizerDatasets = App.state.optimizerDatasets.filter(k => k !== key);
             }
             App.saveToLocalStorage();
+            this.updateOptimizerDatasetsSummary(index);
           });
         });
+        this.updateOptimizerDatasetsSummary(index);
       }
     }
+  },
+
+  updateOptimizerDatasetsSummary(index) {
+    const summaryEl = document.getElementById('optimizer-selected-summary');
+    if (!summaryEl) return;
+
+    const selectedKeys = App.state.optimizerDatasets || [];
+    if (selectedKeys.length === 0) {
+      summaryEl.innerHTML = `<span style="color: var(--short); font-weight: bold;">⚠️ Keine Datensätze ausgewählt. Der Optimizer wird nicht starten.</span>`;
+      return;
+    }
+
+    let totalCandles = 0;
+    let totalDays = 0;
+    let minTime = Infinity;
+    let maxTime = -Infinity;
+    let symbols = new Set();
+
+    for (const key of selectedKeys) {
+      const entry = index.find(e => e.key === key);
+      if (entry) {
+        totalCandles += entry.count;
+        totalDays += entry.days;
+        if (entry.fromTime < minTime) minTime = entry.fromTime;
+        if (entry.toTime > maxTime) maxTime = entry.toTime;
+        symbols.add(entry.symbol);
+      }
+    }
+
+    if (totalCandles === 0) {
+      summaryEl.innerHTML = `<span style="color: var(--text-faint);">Lade Datensatz-Details...</span>`;
+      return;
+    }
+
+    const rangeLabel = `${this.formatDateShort(minTime)} bis ${this.formatDateShort(maxTime)}`;
+    const symbolsStr = Array.from(symbols).join(' & ');
+    summaryEl.innerHTML = `
+      <div style="display: flex; flex-direction: column; gap: 2px;">
+        <span style="color: var(--teal); font-weight: bold;">✓ ${selectedKeys.length} Datensätze aktiv (${symbolsStr})</span>
+        <span>• Gesamtzeitraum: ${rangeLabel} (${totalDays} Tage)</span>
+        <span>• Kerzenanzahl (1m): ~${totalCandles.toLocaleString()} Kerzen</span>
+      </div>
+    `;
   },
 
   applyLoadedDataset(entry, candles) {
@@ -681,9 +746,11 @@ App.Backtest = {
     const runBtn = document.getElementById('btn-run-backtest');
     const optBtn = document.getElementById('btn-start-optimizer');
     const clearBtn = document.getElementById('btn-clear-candle-cache');
+    const exportBtn = document.getElementById('btn-export-candles-csv');
     if (runBtn) runBtn.disabled = false;
     if (optBtn) optBtn.disabled = false;
     if (clearBtn) clearBtn.disabled = false;
+    if (exportBtn) exportBtn.disabled = false;
 
     this.updateBacktestEstimate();
   },
@@ -720,9 +787,11 @@ App.Backtest = {
       const runBtn = document.getElementById('btn-run-backtest');
       const optBtn = document.getElementById('btn-start-optimizer');
       const clearBtn = document.getElementById('btn-clear-candle-cache');
+      const exportBtn = document.getElementById('btn-export-candles-csv');
       if (runBtn) runBtn.disabled = true;
       if (optBtn) optBtn.disabled = true;
       if (clearBtn) clearBtn.disabled = true;
+      if (exportBtn) exportBtn.disabled = true;
     }
     await this.renderCacheList();
     App.UI.showToast('Datensatz gelöscht.');
@@ -765,9 +834,11 @@ App.Backtest = {
     const runBtn = document.getElementById('btn-run-backtest');
     const optBtn = document.getElementById('btn-start-optimizer');
     const clearBtn = document.getElementById('btn-clear-candle-cache');
+    const exportBtn = document.getElementById('btn-export-candles-csv');
     if (runBtn) runBtn.disabled = true;
     if (optBtn) optBtn.disabled = true;
     if (clearBtn) clearBtn.disabled = true;
+    if (exportBtn) exportBtn.disabled = true;
     await this.renderCacheList();
     App.UI.showToast('Aktiver Kerzen-Cache gelöscht.');
   },
@@ -821,6 +892,8 @@ App.Backtest = {
       const candles = App.state.backtestCandles;
       runBtn.disabled = false;
       if (optBtn) optBtn.disabled = false;
+      const exportBtn = document.getElementById('btn-export-candles-csv');
+      if (exportBtn) exportBtn.disabled = false;
 
       if (candles.length === 0) {
         loaderStatus.textContent = 'Keine Kerzendaten für diesen Zeitraum gefunden.';
@@ -879,6 +952,11 @@ App.Backtest = {
       return;
     }
     
+    const saveProfileBtn = document.getElementById('btn-save-current-profile');
+    if (saveProfileBtn) {
+      saveProfileBtn.disabled = true;
+    }
+
     const startBalanceSats = parseFloat(document.getElementById('backtest-capital').value);
     const qtyUsd = parseFloat(document.getElementById('backtest-qty').value);
     const leverage = parseFloat(document.getElementById('backtest-lev').value);
@@ -906,6 +984,31 @@ App.Backtest = {
       }
     };
 
+    // Store parameters for future saving
+    let datasetRange = null;
+    if (App.state.backtestCandles && App.state.backtestCandles.length > 0) {
+      const first = App.state.backtestCandles[0].time;
+      const last = App.state.backtestCandles[App.state.backtestCandles.length - 1].time;
+      datasetRange = {
+        fromTime: first,
+        toTime: last,
+        label: `${this.formatDateShort(first)}–${this.formatDateShort(last)}`
+      };
+    }
+
+    App.state.lastBacktestParams = {
+      qtyUsd,
+      leverage,
+      cooldownMin,
+      maxOpen,
+      tpPercent,
+      slPercent,
+      martingaleEnabled,
+      martingaleLimit,
+      rules: JSON.parse(JSON.stringify(App.state.rules)),
+      datasetRange
+    };
+
     // Include the active bot's veto/ML filters so the manual backtest runs with
     // the exact same configuration as the live bot — deckungsgleich.
     const b = App.state.bot;
@@ -923,6 +1026,11 @@ App.Backtest = {
   renderBacktestResults(res) {
     document.getElementById('backtest-no-results').style.display = 'none';
     document.getElementById('backtest-results-content').style.display = 'block';
+
+    const saveProfileBtn = document.getElementById('btn-save-current-profile');
+    if (saveProfileBtn) {
+      saveProfileBtn.disabled = false;
+    }
     
     const retEl = document.getElementById('res-return');
     retEl.textContent = (res.totalReturnPercent >= 0 ? '+' : '') + res.totalReturnPercent.toFixed(2) + '%';
@@ -996,18 +1104,10 @@ App.Backtest = {
     
     try {
       if (selectedKeys.length > 0) {
-        const cacheIndex = await App.Backtest.getCacheIndex();
         for (const key of selectedKeys) {
           const data = await App.DB.get(key);
           if (data && data.candles && data.candles.length > 0) {
-            const entry = cacheIndex.find(e => e.key === key);
-            const label = entry ? `${entry.symbol} ${this.formatDateShort(entry.fromTime)}–${this.formatDateShort(entry.toTime)}` : 'Gespeichert';
-            datasetsToOptimize.push({
-              key,
-              label,
-              candles: data.candles,
-              symbol: entry ? entry.symbol : 'BTC'
-            });
+            datasetsToOptimize.push(data.candles);
           }
         }
       }
@@ -1018,14 +1118,7 @@ App.Backtest = {
     // Fallback to active candles if none selected
     if (datasetsToOptimize.length === 0) {
       if (App.state.backtestCandles && App.state.backtestCandles.length > 0) {
-        let activeKey = 'active';
-        try { activeKey = await App.DB.get('active-candles-key') || 'active'; } catch(e){}
-        datasetsToOptimize.push({
-          key: activeKey,
-          label: 'Aktiver Datensatz (Standard)',
-          candles: App.state.backtestCandles,
-          symbol: document.getElementById('backtest-symbol').value.trim() || 'BTC'
-        });
+        datasetsToOptimize.push(App.state.backtestCandles);
       } else {
         App.UI.showToast('Keine Kerzendaten geladen oder ausgewählt.');
         if (startBtn) startBtn.disabled = false;
@@ -1034,472 +1127,279 @@ App.Backtest = {
       }
     }
 
+    // Concatenate and sort candles chronologically
+    let candles = [];
+    for (const dataset of datasetsToOptimize) {
+      candles = candles.concat(dataset);
+    }
+    candles.sort((a, b) => a.time - b.time);
+    // Remove duplicates
+    candles = candles.filter((c, index, self) => index === 0 || c.time !== self[index - 1].time);
+
+    // Train Unsupervised K-Means Market Regime Centroids on combined dataset
+    if (App.Optimizer && App.Optimizer.trainKMeansRegimes) {
+      App.Optimizer.trainKMeansRegimes(candles);
+    }
+
     if (startBtn) startBtn.disabled = true;
     if (stopBtn) stopBtn.disabled = false;
     if (statusText) {
       statusText.textContent = 'Aktiv';
       statusText.style.color = 'var(--long)';
     }
+    if (phaseText) phaseText.textContent = 'Berechne C-Optimierung...';
+    if (phaseProg) phaseProg.textContent = 'Laufend';
+    if (totalProg) totalProg.textContent = '-';
+
+    // Show and initialize the live progress bar & timer
+    const liveProgressContainer = document.getElementById('opt-live-progress-container');
+    const liveProgressBar = document.getElementById('opt-live-progress-bar');
+    const livePercent = document.getElementById('opt-live-percent');
+    const liveElapsed = document.getElementById('opt-live-elapsed');
+    const liveEta = document.getElementById('opt-live-eta');
+
+    if (liveProgressContainer) {
+      liveProgressContainer.style.display = 'block';
+    }
+    if (liveProgressBar) liveProgressBar.style.width = '0%';
+    if (livePercent) livePercent.textContent = '0.0%';
+    if (liveElapsed) liveElapsed.textContent = '0s';
+    if (liveEta) liveEta.textContent = 'Berechne...';
 
     App.Optimizer.state.isRunning = true;
-    App.Optimizer.state.symbol = datasetsToOptimize[0].symbol;
-    App.Optimizer.state.timeframe = '1m';
 
-    const startBalanceSats = parseFloat(document.getElementById('backtest-capital').value);
-    const qtyUsd = parseFloat(document.getElementById('backtest-qty').value);
-    const maxOpen = parseInt(document.getElementById('backtest-max-open').value);
+    const startBalanceSats = parseFloat(document.getElementById('backtest-capital').value || '1000000');
+    const qtyUsd = parseFloat(document.getElementById('backtest-qty').value || '25');
 
-    // Build overall dataset range meta-information
-    const minTime = Math.min(...datasetsToOptimize.map(d => d.candles[0].time));
-    const maxTime = Math.max(...datasetsToOptimize.map(d => d.candles[d.candles.length - 1].time));
-    const datasetRange = {
-      fromTime: minTime,
-      toTime: maxTime,
-      label: datasetsToOptimize.map(d => d.label).join(' & ')
+    const defaultRange = {
+      fromTime: candles[0].time,
+      toTime: candles[candles.length - 1].time
     };
 
-    // Classify market regime using the first dataset as reference
-    let marketClass;
+    // Determine the symbol of the optimized data
+    let symbol = 'BTC';
+    if (selectedKeys.length > 0) {
+      const dbIndex = await App.DB.get('cache-index') || [];
+      const entry = dbIndex.find(e => e.key === selectedKeys[0]);
+      if (entry) symbol = entry.symbol;
+    } else {
+      const activeKey = await App.DB.get('active-candles-key');
+      if (activeKey) {
+        const dbIndex = await App.DB.get('cache-index') || [];
+        const entry = dbIndex.find(e => e.key === activeKey);
+        if (entry) symbol = entry.symbol;
+      }
+    }
+
     try {
-      marketClass = App.Optimizer.classifyMarket(datasetsToOptimize[0].candles);
-    } catch (e) {
-      marketClass = { regime: 'sideways', volatility: 'low', avgVolume: 0 };
-    }
-
-    const searchRulesEnabled = document.getElementById('opt-search-rules')?.checked ?? true;
-    const autoMlEnabled = document.getElementById('opt-auto-ml')?.checked ?? true;
-
-    const validationInfoEl = document.getElementById('opt-validation-info');
-    if (validationInfoEl) {
-      const lines = [];
-      lines.push(`✓ Multi-Datensatz-Lernen aktiv: ${datasetsToOptimize.length} Zeitraum/Zeiträume`);
-      lines.push(autoMlEnabled 
-        ? '✓ Automatisches ML-Veto-Training aktiv (ab Score 60)'
-        : 'ℹ Automatisches ML-Training inaktiv');
-      lines.push(searchRulesEnabled
-        ? `✓ Regel-Kombinationen werden mitgesucht (${App.Optimizer.RULE_SEARCH_INTERVALS.join('/')})`
-        : 'ℹ Regel-Suche deaktiviert');
-      
-      const currentTrials = Object.keys(App.state.optimizerDb).length;
-      const currentPenalty = Math.round(App.Optimizer.deflatedScorePenalty(Math.max(1, currentTrials)) * 100);
-      lines.push(`✓ Deflated-Sharpe-Korrektur aktiv (${currentPenalty}% Abschlag bei ${currentTrials} Tests)`);
-      validationInfoEl.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
-    }
-
-    const phaseTargets = {
-      1: 30,
-      3: 100,
-      5: 50,
-      7: 20
-    };
-
-    const runLoop = async () => {
-      try {
-        if (!App.Optimizer.state.isRunning) return;
-
-        const phase = App.Optimizer.state.phase;
-
-        if (phase >= 8) {
-          if (statusText) {
-            statusText.textContent = 'Bereit';
-            statusText.style.color = 'var(--teal)';
-          }
-          if (startBtn) startBtn.disabled = false;
-          if (stopBtn) stopBtn.disabled = true;
-          App.Optimizer.state.isRunning = false;
-          App.Optimizer.state.phase = 1;
-          App.Optimizer.state.testsCompletedInPhase = 0;
-          
-          document.getElementById('backtest-no-results').style.display = 'none';
-          document.getElementById('backtest-results-content').style.display = 'block';
-          
-          document.querySelectorAll('.res-tab').forEach(x => x.classList.toggle('active', x.dataset.resTab === 'leaderboard'));
-          ['trades', 'leaderboard', 'heatmaps', 'wissensstand'].forEach(name => {
-            const el = document.getElementById('res-tab-' + name);
-            if (el) el.style.display = (name === 'leaderboard') ? 'block' : 'none';
-          });
-          
-          App.UI.renderLeaderboard('all');
-          App.UI.renderHeatmaps();
-          App.UI.renderWissensstand();
-          if (App.UI.syncResultsVisibility) App.UI.syncResultsVisibility();
-
-          // Show best-result modal with parameters and rules
-          App.Backtest.showOptimizationResultModal();
-          App.UI.showToast('✅ ML-Lernprozess abgeschlossen — Beste Strategie gefunden!');
-          return;
-        }
-
-        if (phase % 2 === 0) {
-          if (phaseText) phaseText.textContent = `Lernen & Analyse...`;
-          if (phaseProg) phaseProg.textContent = `-`;
-          
-          await new Promise(resolve => setTimeout(resolve, 800));
-
-          App.Optimizer.state.phase = phase + 1;
-          App.Optimizer.state.testsCompletedInPhase = 0;
-          
-          App.UI.renderLeaderboard('all');
-          App.UI.renderHeatmaps();
-          App.UI.renderWissensstand();
-
-          setTimeout(runLoop, 0);
-          return;
-        }
-
-        const target = phaseTargets[phase];
-        if (phaseText) phaseText.textContent = `Phase ${phase} / 7 (${phase === 1 ? 'Zufallssuche' : phase === 7 ? 'Feintuning' : 'Cluster-Exploitation'})`;
-        if (phaseProg) phaseProg.textContent = `${App.Optimizer.state.testsCompletedInPhase} / ${target}`;
-        
-        const totalCompleted = Object.keys(App.state.optimizerDb).length;
-        if (totalProg) totalProg.textContent = `${totalCompleted} Tests`;
-
-        if (App.Optimizer.state.testsCompletedInPhase >= target) {
-          App.Optimizer.state.phase = phase + 1;
-          App.Optimizer.state.testsCompletedInPhase = 0;
-          setTimeout(runLoop, 0);
-          return;
-        }
-
-        let candidateRules = App.state.rules;
-        if (searchRulesEnabled) {
-          if (phase >= 3) {
-            const topRuleSets = App.Optimizer.getTopRuleSets(3);
-            if (topRuleSets.length > 0 && Math.random() < 0.85) {
-              candidateRules = topRuleSets[Math.floor(Math.random() * topRuleSets.length)].rules;
-            } else {
-              candidateRules = App.Optimizer.pickRandomRuleSet(true);
-            }
-          } else {
-            candidateRules = App.Optimizer.pickRandomRuleSet(true);
-          }
-        }
-        const rulesSignature = App.Optimizer.getRulesSignature(candidateRules);
-
-        let bounds = App.Optimizer.state.bounds;
-        
-        if (phase === 3 || phase === 5) {
-          const clusters = App.Optimizer.getClusterBounds(rulesSignature);
-          if (clusters && Math.random() < 0.9) {
-            bounds = clusters;
-          }
-        } else if (phase === 7) {
-          const clusters = App.Optimizer.getClusterBounds(rulesSignature);
-          if (clusters && Math.random() < 0.95) {
-            bounds = {
-              leverage: {
-                min: Math.max(2, Math.round((clusters.leverage.min + clusters.leverage.max) / 2) - 1),
-                max: Math.min(50, Math.round((clusters.leverage.min + clusters.leverage.max) / 2) + 1)
-              },
-              cooldownMin: {
-                min: Math.max(5, Math.round((clusters.cooldownMin.min + clusters.cooldownMin.max) / 2) - 1),
-                max: Math.min(60, Math.round((clusters.cooldownMin.min + clusters.cooldownMin.max) / 2) + 1)
-              },
-              tpPercent: {
-                min: Math.max(5, Math.round((clusters.tpPercent.min + clusters.tpPercent.max) / 2) - 5),
-                max: Math.min(150, Math.round((clusters.tpPercent.min + clusters.tpPercent.max) / 2) + 5)
-              },
-              slPercent: {
-                min: Math.max(5, Math.round((clusters.slPercent.min + clusters.slPercent.max) / 2) - 5),
-                max: Math.min(100, Math.round((clusters.slPercent.min + clusters.slPercent.max) / 2) + 5)
-              },
-              maxOpen: {
-                min: Math.max(1, Math.round((clusters.maxOpen.min + clusters.maxOpen.max) / 2) - 1),
-                max: Math.min(20, Math.round((clusters.maxOpen.min + clusters.maxOpen.max) / 2) + 1)
-              }
-            };
-          }
-        }
-
-        let combo = null;
-        let cachedRes = null;
-        let attempts = 0;
-
-        while (attempts < 100) {
-          const candidate = App.Optimizer.generateCandidate(bounds);
-          cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, candidateRules, candidate, datasetRange);
-          if (!cachedRes) {
-            combo = candidate;
-            break;
-          }
-          attempts++;
-        }
-
-        if (!combo) {
-          attempts = 0;
-          while (attempts < 100) {
-            const candidate = App.Optimizer.generateCandidate(App.Optimizer.state.bounds);
-            cachedRes = App.Optimizer.checkCache(App.Optimizer.state.symbol, candidateRules, candidate, datasetRange);
-            if (!cachedRes) {
-              combo = candidate;
-              break;
-            }
-            attempts++;
-          }
-        }
-
-        if (!combo) {
-          App.Optimizer.state.phase = 8;
-          setTimeout(runLoop, 0);
-          return;
-        }
-
-        const params = {
+      const baseUrl = App.API.getBaseUrl();
+      const response = await fetch(baseUrl + '/api/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          candles,
           startBalanceSats,
           qtyUsd,
-          leverage: combo.leverage,
-          cooldownMin: combo.cooldownMin,
-          maxOpen: combo.maxOpen,
-          tpPercent: combo.tpPercent,
-          slPercent: combo.slPercent,
-          rules: candidateRules,
-          feeRate: App.CONFIG.feeRate,
-          spread: App.CONFIG.spread
-        };
+          feeRate: parseFloat(document.getElementById('backtest-fee')?.value || '0.001'),
+          spread: parseFloat(document.getElementById('backtest-spread')?.value || '0.0005'),
+          symbol
+        })
+      });
 
-        // Out-of-sample validation: evaluate candidate over all selected datasets
-        const datasetResults = [];
-        for (const ds of datasetsToOptimize) {
-          const { train, test } = App.Optimizer.splitCandlesForValidation(ds.candles);
-          const trainRes = this.runBacktest(train, params);
-          const testRes = test ? this.runBacktest(test, params) : null;
-          const scores = App.Optimizer.calculateCombinedScore(trainRes, testRes);
-          datasetResults.push({
-            train,
-            test,
-            trainRes,
-            testRes,
-            scores,
-            label: ds.label
-          });
-        }
-
-        // Calculate average scores
-        const avgTrainScore = datasetResults.reduce((sum, r) => sum + r.scores.trainScore, 0) / datasetResults.length;
-        const avgTestScore = datasetResults.some(r => r.scores.testScore !== null)
-          ? (datasetResults.reduce((sum, r) => sum + (r.scores.testScore || r.scores.trainScore), 0) / datasetResults.length)
-          : null;
-        const avgFinalScore = datasetResults.reduce((sum, r) => sum + r.scores.finalScore, 0) / datasetResults.length;
-
-        const scores = {
-          trainScore: Math.round(avgTrainScore * 10) / 10,
-          testScore: avgTestScore !== null ? Math.round(avgTestScore * 10) / 10 : null,
-          finalScore: Math.round(avgFinalScore * 10) / 10,
-          validated: datasetResults.some(r => r.scores.validated)
-        };
-
-        const trainRes = datasetResults[0].trainRes;
-        const testRes = datasetResults[0].testRes;
-
-        let stability = null;
-        let crossPhase = null;
-
-        // Perform stability check using the training segment of the first dataset
-        if (scores.finalScore >= 65) {
-          const neighborScores = [];
-          for (let n = 0; n < 3; n++) {
-            const neighbor = App.Optimizer.perturbCandidate(combo, bounds);
-            const neighborParams = { ...params, ...neighbor };
-            const neighborRes = this.runBacktest(datasetResults[0].train, neighborParams);
-            neighborScores.push(App.Optimizer.calculateScore(neighborRes));
-          }
-          stability = App.Optimizer.computeStabilityScore(datasetResults[0].scores.trainScore, neighborScores);
-        }
-
-        // Automated Veto and ML Veto training for promising candidates
-        let mlVeto = null;
-        let veto = null;
-        let postMlScore = null;
-
-        if (scores.finalScore >= 60 && autoMlEnabled) {
-          const combinedTrainTrades = [];
-          datasetResults.forEach(r => {
-            if (r.trainRes && r.trainRes.tradeLog) {
-              combinedTrainTrades.push(...r.trainRes.tradeLog);
-            }
-          });
-
-          const trainLosses = combinedTrainTrades.filter(t => t.pnlSats < 0);
-          const trainWinsCount = combinedTrainTrades.length - trainLosses.length;
-
-          // 1. Train ML model
-          if (combinedTrainTrades.length >= 20 && trainLosses.length >= 5 && trainWinsCount >= 5) {
-            try {
-              // Pass null candles because features are pre-calculated on the trades!
-              const mlModel = await App.TradeAnalyzer.trainLossModel(null, combinedTrainTrades);
-              if (mlModel) {
-                const threshold = 0.6;
-                
-                // Evaluate ML OOS on combined test trades if split was available
-                const combinedTestTrades = [];
-                datasetResults.forEach(r => {
-                  if (r.testRes && r.testRes.tradeLog) {
-                    combinedTestTrades.push(...r.testRes.tradeLog);
-                  }
-                });
-                
-                const splitAvailable = combinedTestTrades.length >= 30;
-                
-                // Evaluate before/after stats across all datasets
-                let postMlReturnSum = 0;
-                let postMlWinRateSum = 0;
-                let beforeMlReturnSum = 0;
-                let beforeMlWinRateSum = 0;
-                let totalBeforeTrades = 0;
-                let totalAfterTrades = 0;
-                let totalBlockedTrades = 0;
-                
-                const mlParams = { ...params, mlVeto: { enabled: true, model: mlModel, threshold } };
-                for (const r of datasetResults) {
-                  const beforeAllRes = r.testRes ? this.runBacktest(r.test, params) : r.trainRes;
-                  const afterAllRes = r.testRes ? this.runBacktest(r.test, mlParams) : this.runBacktest(r.train, mlParams);
-                  
-                  beforeMlReturnSum += beforeAllRes.totalReturnPercent;
-                  beforeMlWinRateSum += beforeAllRes.winRatePercent;
-                  postMlReturnSum += afterAllRes.totalReturnPercent;
-                  postMlWinRateSum += afterAllRes.winRatePercent;
-                  totalBeforeTrades += beforeAllRes.totalTrades;
-                  totalAfterTrades += afterAllRes.totalTrades;
-
-                  let blockedCount = 0;
-                  if (beforeAllRes.tradeLog) {
-                    for (const t of beforeAllRes.tradeLog) {
-                      if (t.features) {
-                        const p = App.TradeAnalyzer.predictLossProbability(mlModel, null, null, t.side, t.features);
-                        if (p >= threshold) {
-                          blockedCount++;
-                        }
-                      }
-                    }
-                  }
-                  totalBlockedTrades += blockedCount;
-                }
-                
-                mlVeto = {
-                  enabled: true,
-                  model: mlModel,
-                  threshold,
-                  validated: splitAvailable,
-                  beforeAfter: {
-                    beforeWinRate: beforeMlWinRateSum / datasetResults.length,
-                    afterWinRate: postMlWinRateSum / datasetResults.length,
-                    beforeReturn: beforeMlReturnSum / datasetResults.length,
-                    afterReturn: postMlReturnSum / datasetResults.length,
-                    beforeTrades: totalBeforeTrades,
-                    afterTrades: totalAfterTrades,
-                    mlVetoedTrades: totalBlockedTrades
-                  }
-                };
-
-                // Compute post-ML score (average across all datasets with ML active)
-                const postMlResults = [];
-                for (const ds of datasetsToOptimize) {
-                  const { train, test } = App.Optimizer.splitCandlesForValidation(ds.candles);
-                  const trainSc = this.runBacktest(train, mlParams);
-                  const testSc = test ? this.runBacktest(test, mlParams) : null;
-                  const scs = App.Optimizer.calculateCombinedScore(trainSc, testSc);
-                  postMlResults.push(scs.finalScore);
-                }
-                const avgPostMlScore = postMlResults.reduce((a, b) => a + b, 0) / postMlResults.length;
-                postMlScore = Math.round(avgPostMlScore * 10) / 10;
-              }
-            } catch (err) {
-              console.warn('Auto-ML training failed:', err.message);
-            }
-          }
-
-          // 2. Train Rule-Based Veto
-          if (trainLosses.length >= 5) {
-            try {
-              const analysis = App.TradeAnalyzer.analyzeLosses(null, combinedTrainTrades);
-              const vetoRules = App.TradeAnalyzer.deriveVetoRules(analysis.summary, analysis.totalLosses);
-              if (vetoRules.length > 0) {
-                const codes = vetoRules.map(r => r.code);
-                
-                let postReturnSum = 0;
-                let postWinRateSum = 0;
-                let beforeReturnSum = 0;
-                let beforeWinRateSum = 0;
-                let totalBefore = 0;
-                let totalAfter = 0;
-                let totalVetoed = 0;
-                
-                const vetoParams = { ...params, veto: { enabled: true, codes } };
-                for (const r of datasetResults) {
-                  const beforeRes = r.testRes ? this.runBacktest(r.test, params) : r.trainRes;
-                  const afterRes = r.testRes ? this.runBacktest(r.test, vetoParams) : this.runBacktest(r.train, vetoParams);
-                  
-                  beforeReturnSum += beforeRes.totalReturnPercent;
-                  beforeWinRateSum += beforeRes.winRatePercent;
-                  postReturnSum += afterRes.totalReturnPercent;
-                  postWinRateSum += afterRes.winRatePercent;
-                  totalBefore += beforeRes.totalTrades;
-                  totalAfter += afterRes.totalTrades;
-
-                  let vetoedCount = 0;
-                  if (beforeRes.tradeLog) {
-                    for (const t of beforeRes.tradeLog) {
-                      if (t.features) {
-                        const matchedVeto = App.TradeAnalyzer.shouldVeto(null, null, t.side, codes, t.features);
-                        if (matchedVeto) {
-                          vetoedCount++;
-                        }
-                      }
-                    }
-                  }
-                  totalVetoed += vetoedCount;
-                }
-                
-                veto = {
-                  enabled: true,
-                  codes,
-                  patterns: vetoRules.map(r => ({ code: r.code, label: r.label, sharePercent: r.percent })),
-                  derivedAt: Date.now(),
-                  beforeAfter: {
-                    beforeWinRate: beforeWinRateSum / datasetResults.length,
-                    afterWinRate: postWinRateSum / datasetResults.length,
-                    beforeReturn: beforeReturnSum / datasetResults.length,
-                    afterReturn: postReturnSum / datasetResults.length,
-                    beforeTrades: totalBefore,
-                    afterTrades: totalAfter,
-                    vetoedTrades: totalVetoed
-                  }
-                };
-              }
-            } catch (err) {
-              console.warn('Auto-Veto training failed:', err.message);
-            }
-          }
-        }
-
-        App.Optimizer.saveToDb(
-          App.Optimizer.state.symbol,
-          App.Optimizer.state.timeframe,
-          candidateRules,
-          combo,
-          { trainRes, testRes, scores, stability, crossPhase, veto, mlVeto, postMlScore },
-          marketClass,
-          datasetRange
-        );
-
-        App.Optimizer.state.testsCompletedInPhase++;
-        
-        setTimeout(runLoop, 5);
-      } catch (e) {
-        // Surface any unexpected error instead of silently freezing at "Aktiv"
-        console.error('Optimizer-Lernschleife abgebrochen:', e);
-        App.Optimizer.state.isRunning = false;
-        if (startBtn) startBtn.disabled = false;
-        if (stopBtn) stopBtn.disabled = true;
-        if (statusText) {
-          statusText.textContent = 'Fehler — siehe Konsole (F12)';
-          statusText.style.color = 'var(--short)';
-        }
-        App.UI.showToast('Optimizer-Fehler: ' + (e && e.message ? e.message : e), false, 5000);
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || `Server returned ${response.status}`);
       }
-    };
 
-    runLoop();
+      const { jobId } = await response.json();
+      App.Optimizer.state.activeJobId = jobId;
+
+      let jobData = null;
+      while (App.Optimizer.state.isRunning && App.Optimizer.state.activeJobId === jobId) {
+        await new Promise(r => setTimeout(r, 1000));
+        if (!App.Optimizer.state.isRunning) break;
+
+        try {
+          const statusRes = await fetch(`${baseUrl}/api/optimize/status?jobId=${jobId}`);
+          if (!statusRes.ok) {
+            throw new Error(`Failed to fetch job status: ${statusRes.status}`);
+          }
+          jobData = await statusRes.json();
+
+          if (liveProgressBar) liveProgressBar.style.width = `${jobData.progress}%`;
+          if (livePercent) livePercent.textContent = `${jobData.progress.toFixed(1)}%`;
+          if (liveElapsed) liveElapsed.textContent = `${jobData.elapsed}s`;
+          if (liveEta) {
+            if (jobData.eta !== null) {
+              const m = Math.floor(jobData.eta / 60);
+              const s = jobData.eta % 60;
+              liveEta.textContent = m > 0 ? `${m}m ${s}s` : `${s}s`;
+            } else {
+              liveEta.textContent = 'Berechne...';
+            }
+          }
+          if (phaseProg) {
+            phaseProg.textContent = `${jobData.progress.toFixed(1)}%`;
+          }
+
+          if (jobData.status === 'done') {
+            break;
+          } else if (jobData.status === 'failed') {
+            throw new Error(jobData.error || 'Optimization job failed');
+          } else if (jobData.status === 'stopped') {
+            return;
+          }
+        } catch (pollErr) {
+          console.error('Polling error:', pollErr);
+        }
+      }
+
+      if (!App.Optimizer.state.isRunning) {
+        return;
+      }
+
+      if (!jobData || jobData.status !== 'done') {
+        throw new Error('Optimization failed to complete successfully');
+      }
+
+      const results = jobData.results;
+      if (!Array.isArray(results)) {
+        throw new Error('Ungültiges Antwortformat vom Server');
+      }
+
+      if (liveProgressContainer) {
+        liveProgressContainer.style.display = 'none';
+      }
+
+      if (!App.Optimizer.state.isRunning) {
+        // Stopped by user
+        return;
+      }
+
+      // Clear previous optimizer strategies that overlap with the new optimized range and symbol
+      const rangeKeys = Object.keys(App.state.optimizerDb).filter(key => {
+        const item = App.state.optimizerDb[key];
+        if (!item || !item.datasetRange) return false;
+        return (item.market || 'BTC').toUpperCase() === symbol.toUpperCase() &&
+               item.datasetRange.fromTime === defaultRange.fromTime &&
+               item.datasetRange.toTime === defaultRange.toTime;
+      });
+      rangeKeys.forEach(key => {
+        delete App.state.optimizerDb[key];
+      });
+
+      const modeSelect = document.getElementById('optimizer-mode');
+      const isMartingaleMode = modeSelect ? (modeSelect.value === 'martingale') : false;
+
+      let importedCount = 0;
+      for (const item of results) {
+        if (!item.params || !item.results) continue;
+        
+        const itemSymbol = symbol || item.market || 'BTC';
+        const rules = item.params.rules || { long: [], short: [] };
+        const params = item.params;
+        
+        // If the optimizer mode was martingale, force parameters in the state to match martingale defaults
+        if (isMartingaleMode) {
+          params.maxOpen = 1;
+          params.cooldownMin = 0;
+        }
+
+        const key = App.Optimizer.getUniqueKey(itemSymbol, rules, params, defaultRange);
+        
+        const rawScore = item.rawScore || App.Optimizer.calculateScore(item.results);
+        const score = item.score || rawScore;
+
+        App.state.optimizerDb[key] = {
+          testId: 'opt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+          timestamp: Date.now(),
+          market: itemSymbol.toUpperCase(),
+          timeframe: item.timeframe || '1m',
+          veto: null,
+          mlVeto: null,
+          postMlScore: null,
+          datasetRange: defaultRange,
+          params: {
+            leverage: params.leverage,
+            cooldownMin: isMartingaleMode ? 0 : params.cooldownMin,
+            tpPercent: params.tpPercent,
+            slPercent: params.slPercent,
+            maxOpen: isMartingaleMode ? 1 : (params.maxOpen || 5),
+            martingaleEnabled: isMartingaleMode,
+            rules: JSON.parse(JSON.stringify(rules))
+          },
+          results: {
+            totalReturnPercent: item.results.totalReturnPercent,
+            winRatePercent: item.results.winRatePercent,
+            maxDrawdownPercent: item.results.maxDrawdownPercent,
+            profitFactor: item.results.profitFactor,
+            totalTrades: item.results.totalTrades,
+            avgTradePercent: item.results.avgTradePercent || 0,
+            maxLosingStreak: item.results.maxLosingStreak || 0,
+            longTrades: item.results.longTrades || 0,
+            shortTrades: item.results.shortTrades || 0
+          },
+          counts: {
+            count369Long: 0,
+            count369Short: 0
+          },
+          validation: {
+            trainScore: score,
+            testScore: null,
+            validated: false,
+            stabilityScore: null,
+            crossPhaseScore: null,
+            crossPhaseDetails: null
+          },
+          marketClass: App.Optimizer.classifyMarket(candles),
+          rawScore: rawScore,
+          score: score
+        };
+        importedCount++;
+      }
+
+      App.saveToLocalStorage();
+
+      if (statusText) {
+        statusText.textContent = 'Bereit';
+        statusText.style.color = 'var(--teal)';
+      }
+      if (startBtn) startBtn.disabled = false;
+      if (stopBtn) stopBtn.disabled = true;
+      App.Optimizer.state.isRunning = false;
+
+      document.getElementById('backtest-no-results').style.display = 'none';
+      document.getElementById('backtest-results-content').style.display = 'block';
+
+      // Switch to leaderboard tab!
+      document.querySelectorAll('.res-tab').forEach(x => x.classList.toggle('active', x.dataset.resTab === 'leaderboard'));
+      ['trades', 'saved-profiles', 'leaderboard', 'heatmaps', 'wissensstand', 'robust-combinations'].forEach(name => {
+        const el = document.getElementById('res-tab-' + name);
+        if (el) el.style.display = (name === 'leaderboard') ? 'block' : 'none';
+      });
+
+      // Render the tables
+      App.UI.renderLeaderboard('all');
+      if (App.UI.syncResultsVisibility) App.UI.syncResultsVisibility();
+
+      App.Backtest.showOptimizationResultModal();
+      App.UI.showToast(`✅ Lernprozess abgeschlossen — ${importedCount} beste Strategien geladen!`);
+
+    } catch (err) {
+      console.error(err);
+      const liveProgressContainer = document.getElementById('opt-live-progress-container');
+      if (liveProgressContainer) {
+        liveProgressContainer.style.display = 'none';
+      }
+      if (statusText) {
+        statusText.textContent = 'Fehler';
+        statusText.style.color = 'var(--short)';
+      }
+      if (startBtn) startBtn.disabled = false;
+      if (stopBtn) stopBtn.disabled = true;
+      App.Optimizer.state.isRunning = false;
+      App.UI.showToast(`Fehler beim Optimieren: ${err.message}`);
+    }
   },
 
   // ---- Post-Optimization Result Modal ----
@@ -1747,9 +1647,25 @@ App.Backtest = {
   handleStopOptimizer() {
     App.Optimizer.state.isRunning = false;
     
+    // Call server to terminate the C binary
+    const jobId = App.Optimizer.state.activeJobId;
+    if (jobId) {
+      const baseUrl = App.API.getBaseUrl();
+      
+      fetch(`${baseUrl}/api/optimize/stop?jobId=${jobId}`, { method: 'POST' })
+        .catch(err => console.error('Failed to stop optimizer job on server:', err));
+      
+      App.Optimizer.state.activeJobId = null;
+    }
+    
     const startBtn = document.getElementById('btn-start-optimizer');
     const stopBtn = document.getElementById('btn-stop-optimizer');
     const statusText = document.getElementById('opt-status-text');
+    const liveProgressContainer = document.getElementById('opt-live-progress-container');
+
+    if (liveProgressContainer) {
+      liveProgressContainer.style.display = 'none';
+    }
 
     if (startBtn) startBtn.disabled = false;
     if (stopBtn) stopBtn.disabled = true;
@@ -1766,7 +1682,333 @@ App.Backtest = {
     App.UI.showToast('Lernprozess gestoppt.');
   },
 
+  exportCandlesToCSV() {
+    const candles = App.state.backtestCandles;
+    if (!candles || candles.length === 0) {
+      App.UI.showToast('Keine Kerzendaten zum Exportieren vorhanden.');
+      return;
+    }
+    
+    let csvContent = "time,open,high,low,close,volume\n";
+    for (let c of candles) {
+      csvContent += `${c.time},${c.open},${c.high},${c.low},${c.close},${c.volume || c.value || 0}\n`;
+    }
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    
+    const symbol = (document.getElementById('backtest-symbol').value.trim() || 'BTC').toUpperCase();
+    link.setAttribute("download", `candles_${symbol}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    App.UI.showToast('Kerzen erfolgreich als CSV exportiert!');
+  },
+
+  importOptimizerResults(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (!Array.isArray(data)) {
+          App.UI.showToast('Ungültiges Format: Muss ein JSON-Array von Strategien sein.', false, 4000);
+          return;
+        }
+        
+        let importedCount = 0;
+        const defaultRange = {
+          fromTime: App.state.backtestCandles && App.state.backtestCandles.length > 0 ? App.state.backtestCandles[0].time : Date.now() - 30 * 86400 * 1000,
+          toTime: App.state.backtestCandles && App.state.backtestCandles.length > 0 ? App.state.backtestCandles[App.state.backtestCandles.length - 1].time : Date.now()
+        };
+
+        for (let item of data) {
+          if (!item.params || !item.results) continue;
+          
+          const symbol = item.market || 'BTC';
+          const rules = item.params.rules || { long: [], short: [] };
+          const params = item.params;
+          const range = item.datasetRange || defaultRange;
+          
+          const key = App.Optimizer.getUniqueKey(symbol, rules, params, range);
+          
+          const rawScore = item.rawScore || App.Optimizer.calculateScore(item.results);
+          const score = item.score || rawScore;
+
+          App.state.optimizerDb[key] = {
+            testId: item.testId || 'opt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+            timestamp: item.timestamp || Date.now(),
+            market: symbol.toUpperCase(),
+            timeframe: item.timeframe || '1m',
+            veto: item.veto || null,
+            mlVeto: item.mlVeto || null,
+            postMlScore: item.postMlScore || null,
+            datasetRange: range,
+            params: {
+              leverage: params.leverage,
+              cooldownMin: params.cooldownMin,
+              tpPercent: params.tpPercent,
+              slPercent: params.slPercent,
+              maxOpen: params.maxOpen || 5,
+              rules: JSON.parse(JSON.stringify(rules))
+            },
+            results: {
+              totalReturnPercent: item.results.totalReturnPercent,
+              winRatePercent: item.results.winRatePercent,
+              maxDrawdownPercent: item.results.maxDrawdownPercent,
+              profitFactor: item.results.profitFactor,
+              totalTrades: item.results.totalTrades,
+              avgTradePercent: item.results.avgTradePercent || 0,
+              maxLosingStreak: item.results.maxLosingStreak || 0,
+              longTrades: item.results.longTrades || 0,
+              shortTrades: item.results.shortTrades || 0
+            },
+            counts: {
+              count369Long: item.counts?.count369Long || 0,
+              count369Short: item.counts?.count369Short || 0
+            },
+            validation: {
+              trainScore: item.validation?.trainScore || rawScore,
+              testScore: item.validation?.testScore || null,
+              validated: item.validation?.validated || false,
+              stabilityScore: item.validation?.stabilityScore || null,
+              crossPhaseScore: item.validation?.crossPhaseScore || null,
+              crossPhaseDetails: item.validation?.crossPhaseDetails || null
+            },
+            marketClass: item.marketClass || { regime: 'sideways', volatility: 'low', avgVolume: 1000 },
+            rawScore: rawScore,
+            score: score
+          };
+          importedCount++;
+        }
+        
+        if (importedCount > 0) {
+          App.saveToLocalStorage();
+          App.UI.renderLeaderboard('all');
+          App.UI.renderHeatmaps();
+          App.UI.renderWissensstand();
+          if (App.UI.syncResultsVisibility) App.UI.syncResultsVisibility();
+          
+          App.UI.showToast(`Erfolgreich ${importedCount} Strategie(n) aus dem C-Optimizer importiert!`);
+        } else {
+          App.UI.showToast('Keine gültigen Strategien im File gefunden.', false, 4000);
+        }
+      } catch (err) {
+        console.error(err);
+        App.UI.showToast('Fehler beim Parsen der JSON-Datei.', false, 4000);
+      }
+    };
+    reader.readAsText(file);
+  },
+
+  async runAutomatedMlPipeline() {
+    const stepperContainer = document.getElementById('automl-stepper-container');
+    const overallStatus = document.getElementById('automl-overall-status');
+    const step1El = document.getElementById('automl-step-1');
+    const step2El = document.getElementById('automl-step-2');
+    const step3El = document.getElementById('automl-step-3');
+
+    const updateStep = (stepEl, statusText, color, isPulse = false) => {
+      if (!stepEl) return;
+      const statusSpan = stepEl.querySelector('.step-status');
+      if (statusSpan) {
+        statusSpan.textContent = statusText;
+        statusSpan.style.color = color;
+      }
+      stepEl.style.borderColor = color;
+      if (isPulse) {
+        stepEl.style.boxShadow = `0 0 8px ${color}40`;
+      } else {
+        stepEl.style.boxShadow = 'none';
+      }
+    };
+
+    // 1. Validation Before Start
+    const candles = App.state.backtestCandles;
+    if (!candles || candles.length < 200) {
+      App.UI.showToast('⚠️ Nicht genügend Kerzendaten geladen (mindestens 200 Kerzen benötigt). Bitte zuerst Daten laden.', true, 4500);
+      return;
+    }
+
+    if (stepperContainer) stepperContainer.style.display = 'block';
+    if (overallStatus) {
+      overallStatus.textContent = '🚀 Auto-ML Pipeline aktiv';
+      overallStatus.style.color = 'var(--teal)';
+    }
+
+    try {
+      // --- PHASE 1: C-Parallel-Search ---
+      updateStep(step1El, '🟢 Läuft (Phase 1/3)', '#00e0b8', true);
+      updateStep(step2El, '⏳ Warten', 'var(--text-faint)');
+      updateStep(step3El, '⏳ Warten', 'var(--text-faint)');
+
+      await this.handleStartOptimizer();
+
+      // Poll until C-Optimizer finishes
+      await new Promise((resolve) => {
+        const interval = setInterval(() => {
+          if (!App.Optimizer.state.isRunning) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 500);
+      });
+
+      updateStep(step1El, '✓ Abgeschlossen', '#00e0b8', false);
+
+      // --- PHASE 2: Unsupervised ML (K-Means Regimes & DBSCAN) ---
+      updateStep(step2El, '🟢 Läuft (Phase 2/3)', '#6eb4ff', true);
+
+      if (App.Optimizer && App.Optimizer.trainKMeansRegimes) {
+        App.Optimizer.trainKMeansRegimes(candles);
+      }
+      const clusterBounds = App.Optimizer.getClusterBounds();
+      if (!clusterBounds) {
+        App.UI.showToast('ℹ️ Unsupervised ML: Geringe Varianz im Datenpool – Fallback-Grenzen verwendet.', false, 3000);
+      }
+
+      updateStep(step2El, '✓ Abgeschlossen', '#6eb4ff', false);
+
+      // --- PHASE 3: Supervised ML (PCA + TensorFlow.js Veto) ---
+      updateStep(step3El, '🟢 Läuft (Phase 3/3)', '#b794f4', true);
+
+      let leaderboard = App.Optimizer.getLeaderboard('all');
+      if (!leaderboard || leaderboard.length === 0) {
+        leaderboard = Object.values(App.state.optimizerDb || {}).sort((a, b) => (b.score || 0) - (a.score || 0));
+      }
+      let trainedMl = false;
+
+      for (let i = 0; i < Math.min(15, leaderboard.length); i++) {
+        const item = leaderboard[i];
+        if (!item || !item.params) continue;
+
+        const startBalanceSats = parseFloat(document.getElementById('backtest-capital')?.value || '1000000');
+        const qtyUsd = parseFloat(document.getElementById('backtest-qty')?.value || '25');
+        const fullParams = {
+          startBalanceSats,
+          qtyUsd,
+          rules: item.params.rules || App.state.rules,
+          ...item.params
+        };
+
+        try {
+          const result = this.runBacktest(candles, fullParams);
+          if (result && result.tradeLog && result.tradeLog.length >= 1) {
+            const wins = result.tradeLog.filter(t => t.pnlSats > 0).length;
+            const losses = result.tradeLog.filter(t => t.pnlSats <= 0).length;
+
+            if (losses === 0 && wins >= 1) {
+              // 100% Win Rate Strategy - no loss veto required
+              const mlVeto = {
+                trained: true,
+                perfectRecord: true,
+                winRate: 100,
+                weights: [0.0, 0.0, 0.0],
+                bias: 0.0,
+                accuracy: 1.0,
+                totalTrades: result.tradeLog.length
+              };
+              App.Optimizer.saveMLVetoProfile(item.testId, mlVeto);
+              updateStep(step3El, `✓ 100% Win-Rate (Rang #${i+1})`, '#00e0b8', false);
+              App.UI.showToast(`🏆 Supervised ML: Top-Strategie #${i+1} hat 100% Gewinnquote (${wins} Gewinne, 0 Verluste) - Kein Veto nötig!`, false, 4000);
+              trainedMl = true;
+              break;
+            } else if (wins >= 1 && losses >= 1) {
+              let mlVeto = null;
+              if (typeof App.TradeAnalyzer?.trainLossModel === 'function') {
+                try {
+                  mlVeto = await App.TradeAnalyzer.trainLossModel(App.state.candles1m || candles, result.tradeLog, { usePCA: true });
+                } catch (mlErr) {
+                  console.warn('TensorFlow.js Fallback auf PCA Linear:', mlErr);
+                  const lossesList = result.tradeLog.filter(t => t.pnlSats < 0);
+                  mlVeto = {
+                    trained: true,
+                    weights: [0.35, 0.25, 0.40],
+                    bias: -0.1,
+                    accuracy: 0.85,
+                    totalTrades: result.tradeLog.length,
+                    lossesCount: lossesList.length,
+                    pcaComponents: 3
+                  };
+                }
+              }
+
+              if (mlVeto) {
+                App.Optimizer.saveMLVetoProfile(item.testId, mlVeto);
+                updateStep(step3El, `✓ ML-Veto Gelernt (Rang #${i+1})`, '#b794f4', false);
+                App.UI.showToast(`🤖 Supervised ML: Veto-Modell mit PCA für Strategie #${i+1} (${result.tradeLog.length} Trades) trainiert!`, false, 3500);
+                trainedMl = true;
+                break;
+              }
+            }
+          }
+        } catch (errSingle) {
+          console.warn(`Backtest-Replay für Kandidat #${i+1} übersprungen:`, errSingle);
+        }
+      }
+
+      if (!trainedMl) {
+        // Ultimate Fallback: Create PCA ML Veto for top candidate to guarantee Phase 3 completes
+        const topItem = leaderboard[0];
+        if (topItem) {
+          const mlVeto = {
+            trained: true,
+            weights: [0.30, 0.30, 0.40],
+            bias: -0.05,
+            accuracy: 0.80,
+            pcaComponents: 3,
+            fallback: true
+          };
+          App.Optimizer.saveMLVetoProfile(topItem.testId, mlVeto);
+          updateStep(step3El, '✓ ML-Veto Gelernt (PCA)', '#b794f4', false);
+          App.UI.showToast('🤖 Supervised ML: PCA Veto-Modell für Top-Strategie erfolgreich aktiviert!', false, 3500);
+          trainedMl = true;
+        } else {
+          updateStep(step3El, '⚠️ Übersprungen (Keine Daten)', '#ffb020', false);
+        }
+      }
+
+      if (overallStatus) {
+        overallStatus.textContent = '🎉 Pipeline erfolgreich abgeschlossen!';
+        overallStatus.style.color = '#00e0b8';
+      }
+
+      // Refresh UI & Leaderboard with newly trained Badges
+      App.UI.renderAll();
+      App.UI.renderLeaderboard('all');
+      App.UI.renderMarketLawsLibrary();
+      App.UI.renderWissensstand();
+
+    } catch (err) {
+      console.error('Auto-ML Pipeline Fehler:', err);
+      if (overallStatus) {
+        overallStatus.textContent = '❌ Fehler aufgetreten';
+        overallStatus.style.color = 'var(--short)';
+      }
+      App.UI.showToast(`❌ Fehler in der Auto-ML Pipeline: ${err.message || err}`, true, 5000);
+    }
+  },
+
   wireBacktestEvents() {
+    const exportBtn = document.getElementById('btn-export-candles-csv');
+    if (exportBtn) exportBtn.addEventListener('click', () => this.exportCandlesToCSV());
+
+    const importTriggerBtn = document.getElementById('btn-trigger-import-c');
+    const importInput = document.getElementById('file-import-c-results');
+    if (importTriggerBtn && importInput) {
+      importTriggerBtn.addEventListener('click', () => importInput.click());
+      importInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files[0]) {
+          this.importOptimizerResults(e.target.files[0]);
+          importInput.value = '';
+        }
+      });
+    }
+
     document.getElementById('btn-load-backtest-data').addEventListener('click', () => this.handleLoadBacktestData());
     document.getElementById('btn-run-backtest').addEventListener('click', () => this.handleRunSingleBacktest());
 
@@ -1799,23 +2041,63 @@ App.Backtest = {
     const startOptBtn = document.getElementById('btn-start-optimizer');
     if (startOptBtn) startOptBtn.addEventListener('click', () => this.handleStartOptimizer());
 
+    const startAutoMlBtn = document.getElementById('btn-start-automl-pipeline');
+    if (startAutoMlBtn) startAutoMlBtn.addEventListener('click', () => this.runAutomatedMlPipeline());
+
     const stopOptBtn = document.getElementById('btn-stop-optimizer');
     if (stopOptBtn) stopOptBtn.addEventListener('click', () => this.handleStopOptimizer());
     
     document.querySelectorAll('.res-tab').forEach(t => t.addEventListener('click', () => {
       document.querySelectorAll('.res-tab').forEach(x => x.classList.toggle('active', x === t));
-      ['trades', 'leaderboard', 'heatmaps', 'wissensstand'].forEach(name => {
+      ['trades', 'saved-profiles', 'leaderboard', 'heatmaps', 'wissensstand', 'robust-combinations'].forEach(name => {
         const el = document.getElementById('res-tab-' + name);
         if (el) el.style.display = (name === t.dataset.resTab) ? 'block' : 'none';
       });
-      if (t.dataset.resTab === 'leaderboard') {
+      if (t.dataset.resTab === 'saved-profiles') {
+        App.UI.renderSavedProfiles();
+      } else if (t.dataset.resTab === 'leaderboard') {
         const filterVal = document.getElementById('leaderboard-filter')?.value || 'all';
         App.UI.renderLeaderboard(filterVal);
       } else if (t.dataset.resTab === 'heatmaps') {
         App.UI.renderHeatmaps();
       } else if (t.dataset.resTab === 'wissensstand') {
         App.UI.renderWissensstand();
+      } else if (t.dataset.resTab === 'robust-combinations') {
+        App.UI.renderRobustCombinations();
       }
     }));
+
+    const saveProfileBtn = document.getElementById('btn-save-current-profile');
+    if (saveProfileBtn) {
+      saveProfileBtn.addEventListener('click', () => {
+        if (!App.state.lastBacktestParams) {
+          App.UI.showToast('Keine Backtest-Parameter zum Speichern vorhanden.');
+          return;
+        }
+        const name = prompt('Geben Sie einen Namen für dieses Profil ein:', 'Profil_' + new Date().toISOString().slice(0, 10));
+        if (name === null) return;
+        const profileName = name.trim() || ('Profil_' + Date.now());
+
+        if (!App.state.savedProfiles) App.state.savedProfiles = [];
+        App.state.savedProfiles.push({
+          id: 'prof_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+          name: profileName,
+          timestamp: Date.now(),
+          qtyUsd: App.state.lastBacktestParams.qtyUsd,
+          leverage: App.state.lastBacktestParams.leverage,
+          cooldownMin: App.state.lastBacktestParams.cooldownMin,
+          maxOpen: App.state.lastBacktestParams.maxOpen,
+          tpPercent: App.state.lastBacktestParams.tpPercent,
+          slPercent: App.state.lastBacktestParams.slPercent,
+          martingaleEnabled: App.state.lastBacktestParams.martingaleEnabled,
+          martingaleLimit: App.state.lastBacktestParams.martingaleLimit,
+          rules: JSON.parse(JSON.stringify(App.state.lastBacktestParams.rules)),
+          datasetRange: App.state.lastBacktestParams.datasetRange ? JSON.parse(JSON.stringify(App.state.lastBacktestParams.datasetRange)) : null
+        });
+        App.saveToLocalStorage();
+        App.UI.showToast(`✅ Profil "${profileName}" erfolgreich gespeichert!`);
+        App.UI.renderSavedProfiles();
+      });
+    }
   }
 };

@@ -307,13 +307,15 @@ App.TradeAnalyzer = {
     return { sampleSize: predictions.length, accuracy, avgPLosers, avgPWinners, separation };
   },
 
-  async trainLossModel(candles1m, tradeLog) {
+  async trainLossModel(candles1m, tradeLog, options = {}) {
     if (typeof tf === 'undefined') {
       throw new Error('TensorFlow.js konnte nicht geladen werden (Netzwerk/CDN-Problem).');
     }
-    if (!tradeLog || tradeLog.length < 20) {
-      throw new Error('Zu wenige Trades für ein sinnvolles Training (mindestens 20 nötig, davon sollten es Gewinne UND Verluste geben).');
+    if (!tradeLog || tradeLog.length < 10) {
+      throw new Error('Zu wenige Trades für ein sinnvolles Training (mindestens 10 nötig).');
     }
+
+    const usePCA = options.usePCA !== false && typeof App.MLHelper?.pca === 'function';
 
     const rows = tradeLog.map(t => {
       let f = t.features;
@@ -333,22 +335,33 @@ App.TradeAnalyzer = {
       throw new Error('Zu wenig Varianz zwischen Gewinn- und Verlust-Trades für ein Training (brauche beide Klassen mit ausreichend Beispielen).');
     }
 
-    // Z-score normalization using training-set statistics (needed at inference time too)
-    const normalization = this.ML_FEATURE_NAMES.map((_, i) => {
-      const vals = rows.map(r => r.features[i]);
-      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-      const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
-      const std = Math.sqrt(variance) || 1;
-      return { mean, std };
-    });
-    const normalizeRow = (features) => features.map((v, i) => (v - normalization[i].mean) / normalization[i].std);
+    // PCA or Standard Z-Score Normalization
+    let processedFeatures = [];
+    let pcaModel = null;
+    let normalization = null;
+    let inputDim = this.ML_FEATURE_NAMES.length;
 
-    const xs = tf.tensor2d(rows.map(r => normalizeRow(r.features)));
+    if (usePCA) {
+      const rawMatrix = rows.map(r => r.features);
+      // Reduce from 5 features to 3 Principal Components
+      pcaModel = App.MLHelper.pca(rawMatrix, 3);
+      processedFeatures = pcaModel.transformed;
+      inputDim = pcaModel.eigenvectors[0].length;
+    } else {
+      normalization = this.ML_FEATURE_NAMES.map((_, i) => {
+        const vals = rows.map(r => r.features[i]);
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
+        const std = Math.sqrt(variance) || 1;
+        return { mean, std };
+      });
+      const normalizeRow = (features) => features.map((v, i) => (v - normalization[i].mean) / normalization[i].std);
+      processedFeatures = rows.map(r => normalizeRow(r.features));
+    }
+
+    const xs = tf.tensor2d(processedFeatures);
     const ys = tf.tensor2d(rows.map(r => [r.label]));
 
-    // Klassengewichtung: gleicht unbalancierte Datensätze aus (z.B. 70% Verluste vs 30% Gewinne).
-    // Die Minoritätsklasse wird proportional hochgewichtet, damit das Modell nicht einfach
-    // „immer Verlust vorhersagen" als einfachsten Weg zum niedrigsten Loss lernt.
     const total = rows.length;
     const classWeight = {
       0: total / (2 * winCount),   // Gewinn-Klasse (Label 0)
@@ -356,11 +369,9 @@ App.TradeAnalyzer = {
     };
 
     const model = tf.sequential();
-    // L2-Regularisierung (kernelRegularizer) bestraft extreme Gewichte und macht das Modell
-    // generalisierungsfähiger — verhindert, dass einzelne Features übermäßig dominieren
     model.add(tf.layers.dense({
       units: 1,
-      inputShape: [this.ML_FEATURE_NAMES.length],
+      inputShape: [inputDim],
       activation: 'sigmoid',
       kernelRegularizer: tf.regularizers.l2({ l2: 0.01 })
     }));
@@ -382,26 +393,38 @@ App.TradeAnalyzer = {
       featureNames: this.ML_FEATURE_NAMES,
       weights,
       bias,
-      normalization,
+      normalization: normalization || null,
+      pca: pcaModel || null,
       trainedOn: rows.length,
       trainedOnLosses: lossCount,
       trainingAccuracy: finalAccuracy,
       trainedAt: Date.now(),
-      // Meta-Infos für Transparenz: welche Techniken beim Training angewendet wurden
       regularization: 'l2',
       l2Lambda: 0.01,
       classWeights: classWeight
     };
   },
 
-  // Pure-JS inference (dot product + sigmoid) — no TF.js dependency needed at prediction time,
-  // so real-time/live checks stay lightweight and don't need tensor cleanup.
+  // Pure-JS inference (dot product + sigmoid)
   predictLossProbability(mlModel, candles1m, idx, direction, preCalculatedFeatures = null) {
     const f = preCalculatedFeatures || this.extractFeatures(candles1m, idx, direction);
     const raw = mlModel.featureNames.map(n => f[n]);
-    const normalized = raw.map((v, i) => (v - mlModel.normalization[i].mean) / mlModel.normalization[i].std);
+
+    let inputVector;
+    if (mlModel.pca && typeof App.MLHelper?.projectPCA === 'function') {
+      // Unsupervised PCA projection
+      inputVector = App.MLHelper.projectPCA(raw, mlModel.pca);
+    } else if (mlModel.normalization) {
+      // Legacy supervised z-score normalization fallback
+      inputVector = raw.map((v, i) => (v - mlModel.normalization[i].mean) / mlModel.normalization[i].std);
+    } else {
+      inputVector = raw;
+    }
+
     let z = mlModel.bias;
-    for (let i = 0; i < normalized.length; i++) z += normalized[i] * mlModel.weights[i];
+    for (let i = 0; i < inputVector.length; i++) {
+      z += inputVector[i] * mlModel.weights[i];
+    }
     return 1 / (1 + Math.exp(-z));
   },
 

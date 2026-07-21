@@ -26,6 +26,15 @@ App.init = () => {
   
   setInterval(() => App.UI.updateHeaderStats(), 1000);
   setInterval(() => App.Bot.updateBotCooldownDisplay(), 1000);
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      if (!App.API.ws || App.API.ws.readyState !== WebSocket.OPEN) {
+        console.log('Tab re-focused: Reconnecting WebSocket...');
+        App.API.connectWs(App.state.timeframe || '15m');
+      }
+    }
+  });
 };
 
 // Run initialization once the DOM is fully parsed

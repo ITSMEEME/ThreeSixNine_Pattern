@@ -346,31 +346,142 @@ App.Optimizer = {
     App.saveToLocalStorage();
   },
 
+  trainKMeansRegimes(candles) {
+    if (!candles || candles.length < 300 || !App.MLHelper) return null;
+
+    const windowSize = 240; // 4h
+    const step = 30; // 30m step for rolling windows
+    const samples = [];
+
+    for (let i = 0; i <= candles.length - windowSize; i += step) {
+      const window = candles.slice(i, i + windowSize);
+      const firstClose = window[0].close;
+      const lastClose = window[window.length - 1].close;
+      const priceChangePct = ((lastClose - firstClose) / firstClose) * 100;
+
+      let rangeSum = 0;
+      let volSum = 0;
+      window.forEach(c => {
+        const high = c.high ?? c.close;
+        const low = c.low ?? c.close;
+        rangeSum += (high - low) / c.close;
+        volSum += c.volume ?? 0;
+      });
+
+      const avgRangePct = (rangeSum / window.length) * 100;
+      const avgVolume = Math.round(volSum / window.length);
+
+      samples.push([priceChangePct, avgRangePct, avgVolume]);
+    }
+
+    if (samples.length < 5) return null;
+
+    // Standardize features for K-Means
+    const d = samples[0].length;
+    const means = new Array(d).fill(0);
+    const stds = new Array(d).fill(0);
+
+    for (let j = 0; j < d; j++) {
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) sum += samples[i][j];
+      means[j] = sum / samples.length;
+    }
+
+    for (let j = 0; j < d; j++) {
+      let varSum = 0;
+      for (let i = 0; i < samples.length; i++) varSum += (samples[i][j] - means[j]) ** 2;
+      stds[j] = Math.sqrt(varSum / samples.length) || 1;
+    }
+
+    const normalizedSamples = samples.map(row => row.map((v, j) => (v - means[j]) / stds[j]));
+
+    // Run K-Means with K = 3
+    const kmeansRes = App.MLHelper.kmeans(normalizedSamples, 3, 100);
+
+    // Profile centroids based on raw priceChangePct
+    const centroidsRaw = kmeansRes.centroids.map(cNorm => cNorm.map((v, j) => v * stds[j] + means[j]));
+    const centroidProfiles = centroidsRaw.map((cRaw, idx) => ({
+      idx,
+      priceChangePct: cRaw[0],
+      avgRangePct: cRaw[1],
+      avgVolume: cRaw[2],
+      centroidNorm: kmeansRes.centroids[idx]
+    }));
+
+    centroidProfiles.sort((a, b) => a.priceChangePct - b.priceChangePct);
+
+    // Lowest -> bearish_trend, Highest -> bullish_trend, Middle -> sideways
+    const regimeMapping = {};
+    regimeMapping[centroidProfiles[0].idx] = 'bearish_trend';
+    regimeMapping[centroidProfiles[1].idx] = 'sideways';
+    regimeMapping[centroidProfiles[2].idx] = 'bullish_trend';
+
+    const kmeansRegimes = {
+      centroidsNorm: kmeansRes.centroids,
+      regimeMapping,
+      means,
+      stds,
+      trainedAt: Date.now(),
+      samplesCount: samples.length
+    };
+
+    App.state.mlLibrary.kmeansRegimes = kmeansRegimes;
+    App.saveToLocalStorage();
+    return kmeansRegimes;
+  },
+
   classifyMarket(candles) {
     if (!candles || candles.length === 0) {
-      return { regime: 'sideways', volatility: 'low', avgVolume: 0 };
+      return { regime: 'sideways', volatility: 'low', avgVolume: 0, isKMeans: false };
     }
+
     const firstClose = candles[0].close;
     const lastClose = candles[candles.length - 1].close;
     const priceChangePct = ((lastClose - firstClose) / firstClose) * 100;
-    
-    let regime = 'sideways';
-    if (priceChangePct > 1.5) regime = 'bullish_trend';
-    else if (priceChangePct < -1.5) regime = 'bearish_trend';
-    
+
     let rangeSum = 0;
     let volSum = 0;
     candles.forEach(c => {
       const high = c.high ?? c.close;
       const low = c.low ?? c.close;
       rangeSum += (high - low) / c.close;
-      volSum += c.value ?? 0;
+      volSum += c.volume ?? 0;
     });
+
     const avgRangePct = (rangeSum / candles.length) * 100;
     const volatility = avgRangePct > 0.08 ? 'high' : 'low';
     const avgVolume = Math.round(volSum / candles.length);
-    
-    return { regime, volatility, avgVolume };
+
+    // K-Means Classification (Unsupervised)
+    const kmModel = App.state.mlLibrary?.kmeansRegimes;
+    if (kmModel && kmModel.centroidsNorm && App.MLHelper) {
+      const sample = [priceChangePct, avgRangePct, avgVolume];
+      const normSample = sample.map((v, j) => (v - kmModel.means[j]) / kmModel.stds[j]);
+
+      let minDist = Infinity;
+      let bestCentroidIdx = 0;
+
+      kmModel.centroidsNorm.forEach((cNorm, idx) => {
+        let dist = 0;
+        for (let j = 0; j < cNorm.length; j++) {
+          dist += (normSample[j] - cNorm[j]) ** 2;
+        }
+        if (dist < minDist) {
+          minDist = dist;
+          bestCentroidIdx = idx;
+        }
+      });
+
+      const regime = kmModel.regimeMapping[bestCentroidIdx] || 'sideways';
+      return { regime, volatility, avgVolume, isKMeans: true };
+    }
+
+    // Heuristic Fallback
+    let regime = 'sideways';
+    if (priceChangePct > 1.5) regime = 'bullish_trend';
+    else if (priceChangePct < -1.5) regime = 'bearish_trend';
+
+    return { regime, volatility, avgVolume, isKMeans: false };
   },
 
   analyzeParameters() {
@@ -425,16 +536,48 @@ App.Optimizer = {
     const db = this.getDbWithDynamicScores();
     let goodRuns = db.filter(x => x.score >= 70);
 
-    // Prefer clustering only within the same rule combination — mixing e.g. "1m" and "1m+4h"
-    // strategies' numeric params doesn't make sense. Fall back to all rule sets if too few
-    // same-ruleset samples exist yet.
     if (rulesSignature) {
       const sameRules = goodRuns.filter(x => this.getRulesSignature(x.params.rules) === rulesSignature);
       if (sameRules.length >= 5) goodRuns = sameRules;
     }
 
     if (goodRuns.length < 5) return null;
-    
+
+    // DBSCAN Density Parameter Clustering
+    let targetRuns = goodRuns;
+    if (App.MLHelper && App.MLHelper.dbscan && goodRuns.length >= 6) {
+      const normVectors = goodRuns.map(r => {
+        const p = r.params;
+        return [
+          (p.leverage - 1) / 99,
+          (p.cooldownMin || 0) / 120,
+          (p.tpPercent - 2.5) / 197.5,
+          (p.slPercent - 2.5) / 97.5,
+          ((p.maxOpen || 5) - 1) / 19
+        ];
+      });
+
+      const { clusters } = App.MLHelper.dbscan(normVectors, 0.20, 3);
+      if (clusters && clusters.length > 0) {
+        // Select the cluster with the highest average score
+        let bestClusterIdx = 0;
+        let bestAvgScore = -Infinity;
+
+        clusters.forEach((clsIndices, cIdx) => {
+          const avgScore = clsIndices.reduce((sum, idx) => sum + goodRuns[idx].score, 0) / clsIndices.length;
+          if (avgScore > bestAvgScore) {
+            bestAvgScore = avgScore;
+            bestClusterIdx = cIdx;
+          }
+        });
+
+        const selectedClusterIndices = clusters[bestClusterIdx];
+        if (selectedClusterIndices.length >= 3) {
+          targetRuns = selectedClusterIndices.map(idx => goodRuns[idx]);
+        }
+      }
+    }
+
     const bounds = {
       leverage: { min: Infinity, max: -Infinity },
       cooldownMin: { min: Infinity, max: -Infinity },
@@ -442,18 +585,18 @@ App.Optimizer = {
       slPercent: { min: Infinity, max: -Infinity },
       maxOpen: { min: Infinity, max: -Infinity }
     };
-    
-    goodRuns.forEach(r => {
+
+    targetRuns.forEach(r => {
       const p = r.params;
       if (p.leverage < bounds.leverage.min) bounds.leverage.min = p.leverage;
       if (p.leverage > bounds.leverage.max) bounds.leverage.max = p.leverage;
-      
+
       if (p.cooldownMin < bounds.cooldownMin.min) bounds.cooldownMin.min = p.cooldownMin;
       if (p.cooldownMin > bounds.cooldownMin.max) bounds.cooldownMin.max = p.cooldownMin;
-      
+
       if (p.tpPercent < bounds.tpPercent.min) bounds.tpPercent.min = p.tpPercent;
       if (p.tpPercent > bounds.tpPercent.max) bounds.tpPercent.max = p.tpPercent;
-      
+
       if (p.slPercent < bounds.slPercent.min) bounds.slPercent.min = p.slPercent;
       if (p.slPercent > bounds.slPercent.max) bounds.slPercent.max = p.slPercent;
 
@@ -462,18 +605,18 @@ App.Optimizer = {
         if (p.maxOpen > bounds.maxOpen.max) bounds.maxOpen.max = p.maxOpen;
       }
     });
-    
-    bounds.leverage.min = Math.max(2, bounds.leverage.min - 1);
-    bounds.leverage.max = Math.min(50, bounds.leverage.max + 1);
-    
-    bounds.cooldownMin.min = Math.max(5, bounds.cooldownMin.min - 1);
-    bounds.cooldownMin.max = Math.min(60, bounds.cooldownMin.max + 1);
-    
-    bounds.tpPercent.min = Math.max(5, bounds.tpPercent.min - 5);
-    bounds.tpPercent.max = Math.min(150, bounds.tpPercent.max + 5);
-    
-    bounds.slPercent.min = Math.max(5, bounds.slPercent.min - 5);
-    bounds.slPercent.max = Math.min(100, bounds.slPercent.max + 5);
+
+    bounds.leverage.min = Math.max(1, bounds.leverage.min - 1);
+    bounds.leverage.max = Math.min(100, bounds.leverage.max + 1);
+
+    bounds.cooldownMin.min = Math.max(0, bounds.cooldownMin.min - 1);
+    bounds.cooldownMin.max = Math.min(120, bounds.cooldownMin.max + 1);
+
+    bounds.tpPercent.min = Math.max(2.5, bounds.tpPercent.min - 2.5);
+    bounds.tpPercent.max = Math.min(200, bounds.tpPercent.max + 2.5);
+
+    bounds.slPercent.min = Math.max(2.5, bounds.slPercent.min - 2.5);
+    bounds.slPercent.max = Math.min(100, bounds.slPercent.max + 2.5);
 
     if (bounds.maxOpen.min === Infinity) {
       bounds.maxOpen = { min: 1, max: 20 };
@@ -481,25 +624,11 @@ App.Optimizer = {
       bounds.maxOpen.min = Math.max(1, bounds.maxOpen.min - 1);
       bounds.maxOpen.max = Math.min(20, bounds.maxOpen.max + 1);
     }
-    
+
     return bounds;
   },
 
-  generateCandidate(bounds) {
-    const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-    const randomFloat = (min, max, step) => {
-      const val = Math.random() * (max - min) + min;
-      return Math.round(val / step) * step;
-    };
-    
-    return {
-      leverage: randomInt(bounds.leverage.min, bounds.leverage.max),
-      cooldownMin: randomInt(bounds.cooldownMin.min, bounds.cooldownMin.max),
-      tpPercent: randomFloat(bounds.tpPercent.min, bounds.tpPercent.max, 5),
-      slPercent: randomFloat(bounds.slPercent.min, bounds.slPercent.max, 5),
-      maxOpen: randomInt(bounds.maxOpen.min, bounds.maxOpen.max)
-    };
-  },
+
 
   getWissensstand() {
     const db = this.getDbWithDynamicScores();
@@ -549,9 +678,32 @@ App.Optimizer = {
 
   getLeaderboard(filterRegime = 'all') {
     let db = this.getDbWithDynamicScores();
+    
+    // Filter by active symbol if available
+    const activeSymbol = document.getElementById('backtest-symbol')?.value;
+    if (activeSymbol) {
+      const normActive = activeSymbol.toUpperCase().replace('USDT', '').trim();
+      db = db.filter(x => {
+        const m = (x.market || 'BTC').toUpperCase().replace('USDT', '').trim();
+        return m === normActive || m.includes(normActive) || normActive.includes(m);
+      });
+    }
+
+
     if (filterRegime !== 'all') {
       db = db.filter(x => x.marketClass && x.marketClass.regime === filterRegime);
     }
+
+    const optMode = document.getElementById('optimizer-mode')?.value || 'ml';
+    if (optMode === 'ml_high_freq') {
+      // Prioritize strategies with rich trade samples (N >= 30 trades) for ML training while respecting score
+      return db.sort((a, b) => {
+        const scoreA = (a.results && a.results.totalTrades >= 30 ? a.score * 1.3 : a.score);
+        const scoreB = (b.results && b.results.totalTrades >= 30 ? b.score * 1.3 : b.score);
+        return scoreB - scoreA;
+      }).slice(0, 100);
+    }
+
     return db.sort((a, b) => b.score - a.score).slice(0, 100);
   },
 

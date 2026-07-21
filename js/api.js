@@ -47,6 +47,31 @@ App.API = {
     }
   },
 
+  wsBases: [
+    'wss://stream.binance.com',
+    'wss://data-stream.binance.com',
+    'wss://stream1.binance.com',
+    'wss://stream2.binance.com',
+    'wss://stream3.binance.com',
+    'wss://stream.binance.com:9443',
+    'wss://data-stream.binance.com:9443'
+  ],
+  currentWsBaseIndex: 0,
+
+  getBaseUrl() {
+    if (window.location.protocol === 'file:') {
+      return 'http://localhost:3000';
+    }
+    if (window.location.port === '3000') {
+      return '';
+    }
+    const hostname = window.location.hostname || 'localhost';
+    const protocol = window.location.protocol && window.location.protocol.startsWith('http')
+      ? window.location.protocol
+      : 'http:';
+    return `${protocol}//${hostname}:3000`;
+  },
+
   async fetchBinanceKlines(symbol, interval, limit, endTime = null) {
     const BINANCE_REST_BASES = [
       'https://api.binance.com',
@@ -65,7 +90,8 @@ App.API = {
       const url = `${base}/api/v3/klines?${query}`;
       
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      // Increased timeout to 8000ms to prevent premature aborts on slower networks
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
       
       try {
         const res = await fetch(url, { signal: controller.signal });
@@ -161,19 +187,26 @@ App.API = {
     }
     this.updateWsStatus('connecting');
     
+    const validBinanceIntervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
+    const sym = (App.CONFIG.symbol || 'btcusdt').toLowerCase();
+
     const activeTfs = this.getActiveIntervals();
-    let streams = [`${App.CONFIG.symbol}@aggTrade`, `${App.CONFIG.symbol}@kline_1m`, `${App.CONFIG.symbol}@kline_5m`];
+    let streams = [`${sym}@aggTrade`, `${sym}@kline_1m`, `${sym}@kline_5m`];
     activeTfs.forEach(activeTf => {
-      if (activeTf !== '1m' && activeTf !== '5m') {
-        streams.push(`${App.CONFIG.symbol}@kline_${activeTf}`);
+      const normTf = activeTf.toLowerCase();
+      if (validBinanceIntervals.includes(normTf) && normTf !== '1m' && normTf !== '5m') {
+        streams.push(`${sym}@kline_${normTf}`);
       }
     });
-    if (tf !== '1m' && tf !== '5m' && !activeTfs.includes(tf)) {
-      streams.push(`${App.CONFIG.symbol}@kline_${tf}`);
+
+    const normCurrentTf = (tf || '15m').toLowerCase();
+    if (validBinanceIntervals.includes(normCurrentTf) && normCurrentTf !== '1m' && normCurrentTf !== '5m') {
+      streams.push(`${sym}@kline_${normCurrentTf}`);
     }
     streams = Array.from(new Set(streams));
     
-    const streamUrl = `wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`;
+    const wsBase = this.wsBases[this.currentWsBaseIndex % this.wsBases.length];
+    const streamUrl = `${wsBase}/stream?streams=${streams.join('/')}`;
     this.ws = new WebSocket(streamUrl);
     
     this.ws.onopen = () => {
@@ -184,9 +217,16 @@ App.API = {
     
     this.ws.onmessage = (ev) => {
       this.lastWsUpdateReceived = Date.now();
-      const msg = JSON.parse(ev.data);
-      const stream = msg.stream;
-      const data = msg.data;
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch (e) {
+        return;
+      }
+
+      const data = msg.data || msg;
+      const stream = msg.stream || (msg.e === 'aggTrade' ? `${sym}@aggTrade` : (msg.k ? `${sym}@kline_${msg.k.i}` : ''));
+      if (!data) return;
       
       if (stream && stream.endsWith('@aggTrade')) {
         const price = +data.p;
@@ -264,15 +304,17 @@ App.API = {
     };
     
     this.ws.onerror = (err) => {
-      console.error('WebSocket Fehler:', err);
+      console.error(`WebSocket Fehler auf Endpoint ${wsBase}:`, err);
       this.updateWsStatus('disconnected');
     };
     
     this.ws.onclose = () => {
       this.updateWsStatus('disconnected');
       this.wsReconnectAttempts++;
-      const backoff = Math.min(1000 * Math.pow(1.5, this.wsReconnectAttempts), 15000);
-      console.log(`WebSocket geschlossen. Reconnect in ${Math.round(backoff)}ms...`);
+      // Rotate WebSocket base endpoint to bypass blocked hosts
+      this.currentWsBaseIndex = (this.currentWsBaseIndex + 1) % this.wsBases.length;
+      const backoff = Math.min(1000 * Math.pow(1.3, this.wsReconnectAttempts), 12000);
+      console.log(`WebSocket geschlossen. Reconnect via ${this.wsBases[this.currentWsBaseIndex % this.wsBases.length]} in ${Math.round(backoff)}ms...`);
       if (this.wsReconnectTimeout) clearTimeout(this.wsReconnectTimeout);
       this.wsReconnectTimeout = setTimeout(() => {
         if (App.state.timeframe === tf) this.connectWs(tf);
