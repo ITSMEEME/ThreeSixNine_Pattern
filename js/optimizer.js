@@ -139,34 +139,22 @@ App.Optimizer = {
 
   // Intervals the optimizer is allowed to combine when searching for entry-rule combinations.
   // Kept deliberately bounded (not the full UI list up to 1d) so the search space stays tractable.
-  RULE_SEARCH_INTERVALS: ['1m', '5m', '15m', '1h', '4h'],
+  // Full range of timeframes from 1m up to 12h available for pattern & multi-timeframe rules
+  RULE_SEARCH_INTERVALS: ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h'],
 
-  // Generates all single- and dual-interval rule candidates, including CONTRA patterns where
-  // Long and Short use opposing states across timeframes.
-  //
-  // Single intervals: both trend-following (bull long / bear short) and contra (bear long / bull short)
-  //
-  // Dual intervals: all 4 state permutations (bull+bull, bull+bear, bear+bull, bear+bear) for the
-  // Long side, with the Short side always being the exact state mirror (bull↔bear).
-  // This covers patterns like:
-  //   Trend:    Long 1m Bull + 4h Bull  /  Short 1m Bear + 4h Bear
-  //   Contra-1: Long 1m Bull + 4h Bear  /  Short 1m Bear + 4h Bull  (short-TF momentum vs long-TF reversal)
-  //   Contra-2: Long 1m Bear + 4h Bull  /  Short 1m Bull + 4h Bear  (mean-reversion with trend confirmation)
-  //   Reverse:  Long 1m Bear + 4h Bear  /  Short 1m Bull + 4h Bull  (pure counter-trend)
   generateRuleSetCandidates() {
     const intervals = this.RULE_SEARCH_INTERVALS;
     const mirror = (s) => s === 'bull' ? 'bear' : 'bull';
     const candidates = [];
+    const states = ['bull', 'bear'];
 
-    // ── Single-interval combinations ──
+    // 1. Single-interval combinations (Trend + Contra)
     intervals.forEach(iv => {
-      // Trend-following: long when bull, short when bear
       candidates.push({
         long:  [{ interval: iv, state: 'bull' }],
         short: [{ interval: iv, state: 'bear' }],
         label: iv
       });
-      // Contra / mean-reversion: long when bear, short when bull
       candidates.push({
         long:  [{ interval: iv, state: 'bear' }],
         short: [{ interval: iv, state: 'bull' }],
@@ -174,8 +162,7 @@ App.Optimizer = {
       });
     });
 
-    // ── Dual-interval combinations: all 4 state permutations ──
-    const states = ['bull', 'bear'];
+    // 2. Dual-interval combinations (All 4 state permutations across all timeframe pairs from 1m to 12h)
     for (let i = 0; i < intervals.length; i++) {
       for (let j = i + 1; j < intervals.length; j++) {
         const tf1 = intervals[i];
@@ -191,6 +178,34 @@ App.Optimizer = {
         }
       }
     }
+
+    // 3. Triple-interval combinations (3-Timeframe AND logic, e.g. 1m Bull + 3m Bear + 1h Bull)
+    const trios = [
+      ['1m', '3m', '1h'],
+      ['1m', '5m', '1h'],
+      ['1m', '15m', '4h'],
+      ['3m', '15m', '1h'],
+      ['3m', '30m', '4h'],
+      ['5m', '15m', '1h'],
+      ['5m', '30m', '4h'],
+      ['15m', '1h', '4h'],
+      ['15m', '4h', '12h'],
+      ['1h', '4h', '12h']
+    ];
+
+    trios.forEach(([tf1, tf2, tf3]) => {
+      for (const s1 of states) {
+        for (const s2 of states) {
+          for (const s3 of states) {
+            candidates.push({
+              long:  [{ interval: tf1, state: s1 },        { interval: tf2, state: s2 },        { interval: tf3, state: s3 }],
+              short: [{ interval: tf1, state: mirror(s1) }, { interval: tf2, state: mirror(s2) }, { interval: tf3, state: mirror(s3) }],
+              label: `${tf1}(${s1[0].toUpperCase()})+${tf2}(${s2[0].toUpperCase()})+${tf3}(${s3[0].toUpperCase()})`
+            });
+          }
+        }
+      }
+    });
 
     return candidates;
   },

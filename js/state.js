@@ -34,7 +34,7 @@ App.state = {
     // Fine-Tune-Filter, aus der Verlust-Trade-Analyse abgeleitet: blockiert Live-Signale,
     // die historisch gelernten Verlust-Mustern ähneln
     veto: { enabled: false, codes: [], vetoedCount: 0 },
-    mlVeto: { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
+    mlVeto: { enabled: false, model: null, threshold: 0.50, vetoedCount: 0 },
     shadowTrades: [],
     driftHistory: [],
     martingale: { enabled: false, maxMultiplier: 8, currentStep: 0, accumulatedLossSats: 0, targetProfitSats: 0 }
@@ -49,7 +49,10 @@ App.state = {
   // Selected IndexedDB keys for multi-dataset optimization
   optimizerDatasets: [],
   // Persistent list of manually verified and saved strategy profiles
-  savedProfiles: []
+  savedProfiles: [],
+  // Arena System: Ewiges Ranking mit rotierendem Leave-One-Out
+  arenaSystems: [],
+  arenaResults: []
 };
 
 // Set initial balance from config once loaded
@@ -160,6 +163,8 @@ App.saveToLocalStorage = () => {
     // Save the market-laws library separately too — it's cross-strategy learned knowledge,
     // not simulation state, and shouldn't be wiped on reset either
     localStorage.setItem('paper-perp-ml-library', JSON.stringify(App.state.mlLibrary));
+    // Save Arena database
+    if (App.Arena && App.Arena.saveToLocalStorage) App.Arena.saveToLocalStorage();
   } catch (e) {
     console.error('Fehler beim Speichern in localStorage:', e);
   }
@@ -192,6 +197,10 @@ App.loadFromLocalStorage = () => {
     } catch(e) {
       console.error('Fehler beim Laden der Marktgesetze-Bibliothek aus localStorage:', e);
     }
+  }
+  // Load Arena database separately
+  if (App.Arena && App.Arena.loadFromLocalStorage) {
+    App.Arena.loadFromLocalStorage();
   }
 };
 
@@ -344,7 +353,7 @@ App.resetState = () => {
     lastTradeTime: 0,
     logs: [],
     veto: { enabled: false, codes: [], vetoedCount: 0 },
-    mlVeto: { enabled: false, model: null, threshold: 0.6, vetoedCount: 0 },
+    mlVeto: { enabled: false, model: null, threshold: 0.50, vetoedCount: 0 },
     shadowTrades: [],
     driftHistory: [],
     martingale: { enabled: false, maxMultiplier: 8, currentStep: 0 }

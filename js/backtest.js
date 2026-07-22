@@ -64,7 +64,31 @@ App.Backtest = {
     return aggregated;
   },
 
-  runBacktest(candles1m, params) {
+  runBacktest(candles1m, inputParams) {
+    const params = {
+      startBalanceSats: 1000000,
+      qtyUsd: 25,
+      feeRate: 0.001,
+      spread: 0.0005,
+      leverage: 10,
+      cooldownMin: 10,
+      tpPercent: 30,
+      slPercent: 15,
+      maxOpen: 6,
+      rules: { long: [], short: [] },
+      ...(inputParams || {})
+    };
+    if (!candles1m || !Array.isArray(candles1m) || candles1m.length === 0) {
+      return {
+        finalBalanceSats: params.startBalanceSats,
+        totalReturnPercent: 0,
+        winRatePercent: 0,
+        maxDrawdownPercent: 0,
+        profitFactor: 0,
+        totalTrades: 0,
+        tradeLog: []
+      };
+    }
     let balance = params.startBalanceSats;
     let activeTrades = [];
     let tradeLog = [];
@@ -302,7 +326,7 @@ App.Backtest = {
 
         // ML-Fine-Tune
         if (triggerAction !== 'none' && params.mlVeto && params.mlVeto.enabled && params.mlVeto.model) {
-          const p = App.TradeAnalyzer.shouldVetoML(params.mlVeto.model, candles1m, i, triggerAction, params.mlVeto.threshold || 0.6);
+          const p = App.TradeAnalyzer.shouldVetoML(params.mlVeto.model, candles1m, i, triggerAction, params.mlVeto.threshold || 0.50);
           if (p !== null) {
             mlVetoedCount++;
             triggerAction = 'none';
@@ -1016,7 +1040,7 @@ App.Backtest = {
       params.veto = { enabled: true, codes: b.veto.codes };
     }
     if (b.mlVeto && b.mlVeto.enabled && b.mlVeto.model) {
-      params.mlVeto = { enabled: true, model: b.mlVeto.model, threshold: b.mlVeto.threshold || 0.6 };
+      params.mlVeto = { enabled: true, model: b.mlVeto.model, threshold: b.mlVeto.threshold || 0.50 };
     }
     
     const res = this.runBacktest(App.state.backtestCandles, params);
@@ -1368,17 +1392,12 @@ App.Backtest = {
       if (stopBtn) stopBtn.disabled = true;
       App.Optimizer.state.isRunning = false;
 
-      document.getElementById('backtest-no-results').style.display = 'none';
-      document.getElementById('backtest-results-content').style.display = 'block';
+      const optMainTabBtn = document.querySelector('.tab[data-tab="optimizer"]');
+      if (optMainTabBtn) optMainTabBtn.click();
 
-      // Switch to leaderboard tab!
-      document.querySelectorAll('.res-tab').forEach(x => x.classList.toggle('active', x.dataset.resTab === 'leaderboard'));
-      ['trades', 'saved-profiles', 'leaderboard', 'heatmaps', 'wissensstand', 'robust-combinations'].forEach(name => {
-        const el = document.getElementById('res-tab-' + name);
-        if (el) el.style.display = (name === 'leaderboard') ? 'block' : 'none';
-      });
+      const leaderSubTabBtn = document.querySelector('#tab-optimizer .res-tab[data-res-tab="leaderboard"]');
+      if (leaderSubTabBtn) leaderSubTabBtn.click();
 
-      // Render the tables
       App.UI.renderLeaderboard('all');
       if (App.UI.syncResultsVisibility) App.UI.syncResultsVisibility();
 
@@ -1623,7 +1642,7 @@ App.Backtest = {
       App.state.rules = JSON.parse(JSON.stringify(p.rules));
       // Apply ML veto if present
       if (best.mlVeto && best.mlVeto.model) {
-        App.state.bot.mlVeto = { enabled: true, model: best.mlVeto.model, threshold: best.mlVeto.threshold || 0.6 };
+        App.state.bot.mlVeto = { enabled: true, model: best.mlVeto.model, threshold: best.mlVeto.threshold || 0.50 };
       }
       if (best.veto && best.veto.enabled) {
         App.state.bot.veto = { enabled: true, codes: best.veto.codes };
@@ -2048,21 +2067,34 @@ App.Backtest = {
     if (stopOptBtn) stopOptBtn.addEventListener('click', () => this.handleStopOptimizer());
     
     document.querySelectorAll('.res-tab').forEach(t => t.addEventListener('click', () => {
-      document.querySelectorAll('.res-tab').forEach(x => x.classList.toggle('active', x === t));
+      const parentTabWrap = t.closest('.backtest-results-col') || t.closest('.list-wrap');
+      if (parentTabWrap) {
+        parentTabWrap.querySelectorAll('.res-tab').forEach(x => x.classList.toggle('active', x === t));
+      } else {
+        document.querySelectorAll('.res-tab').forEach(x => x.classList.toggle('active', x === t));
+      }
+
+      const resTabName = t.dataset.resTab;
       ['trades', 'saved-profiles', 'leaderboard', 'heatmaps', 'wissensstand', 'robust-combinations'].forEach(name => {
         const el = document.getElementById('res-tab-' + name);
-        if (el) el.style.display = (name === t.dataset.resTab) ? 'block' : 'none';
+        if (el) {
+          const isTarget = (name === resTabName);
+          if (parentTabWrap && parentTabWrap.contains(el)) {
+            el.style.display = isTarget ? 'block' : 'none';
+          }
+        }
       });
-      if (t.dataset.resTab === 'saved-profiles') {
+
+      if (resTabName === 'saved-profiles') {
         App.UI.renderSavedProfiles();
-      } else if (t.dataset.resTab === 'leaderboard') {
+      } else if (resTabName === 'leaderboard') {
         const filterVal = document.getElementById('leaderboard-filter')?.value || 'all';
         App.UI.renderLeaderboard(filterVal);
-      } else if (t.dataset.resTab === 'heatmaps') {
+      } else if (resTabName === 'heatmaps') {
         App.UI.renderHeatmaps();
-      } else if (t.dataset.resTab === 'wissensstand') {
+      } else if (resTabName === 'wissensstand') {
         App.UI.renderWissensstand();
-      } else if (t.dataset.resTab === 'robust-combinations') {
+      } else if (resTabName === 'robust-combinations') {
         App.UI.renderRobustCombinations();
       }
     }));

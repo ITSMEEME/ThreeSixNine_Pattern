@@ -284,7 +284,7 @@ App.TradeAnalyzer = {
 
   // Evaluates a trained model on trades it never saw during training: how well does the
   // predicted loss-probability actually separate real winners from real losers?
-  evaluateOOS(mlModel, candles1m, testTrades, threshold = 0.6) {
+  evaluateOOS(mlModel, candles1m, testTrades, threshold = 0.50) {
     if (!testTrades || testTrades.length === 0) return null;
 
     const predictions = testTrades.map(t => {
@@ -428,7 +428,7 @@ App.TradeAnalyzer = {
     return 1 / (1 + Math.exp(-z));
   },
 
-  shouldVetoML(mlModel, candles1m, idx, direction, threshold = 0.6) {
+  shouldVetoML(mlModel, candles1m, idx, direction, threshold = 0.50) {
     if (!mlModel) return null;
     const p = this.predictLossProbability(mlModel, candles1m, idx, direction);
     return p >= threshold ? p : null;
