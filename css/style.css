@@ -145,7 +145,7 @@ main{ flex:1; display:flex; min-height:0; }
 .live-price .px.up{ color:var(--long); }
 .live-price .px.down{ color:var(--short); }
 
-#chart-container{ flex:1; min-height:0; position:relative; }
+#chart-container{ flex: 0 0 320px; min-height: 240px; position: relative; border-bottom: 1px solid var(--border); }
 
 /* ---------- SIDE PANEL: ORDER TICKET ---------- */
 .panel{ padding:16px; border-bottom:1px solid var(--border-soft); }
@@ -453,26 +453,28 @@ input[type="range"]{
   .side-col{ width:100%; }
 }
 
-/* ---------- BACKTESTING TAB STYLES ---------- */
-#tab-backtest {
+/* ---------- BACKTESTING / OPTIMIZER / ARENA TAB STYLES ---------- */
+#tab-backtest, #tab-optimizer, #tab-arena {
   padding: 12px;
-}
-.backtest-layout {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-  height: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   overflow-y: auto;
 }
-.tabs-container-wrap.maximized #tab-backtest {
-  display: block;
-  max-width: 1200px;
-  margin: 0 auto;
+
+.backtest-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 360px) 1fr;
+  gap: 16px;
   width: 100%;
+  align-items: start;
 }
-.tabs-container-wrap.maximized .backtest-layout {
-  grid-template-columns: 360px 1fr;
-  overflow-y: visible;
+
+@media (max-width: 900px) {
+  .backtest-layout {
+    grid-template-columns: 1fr;
+  }
 }
 .backtest-section {
   background: var(--surface-2);
@@ -587,103 +589,204 @@ input[type="range"]{
 .metric-card.return.down .m-value { color: var(--short); }
 .metric-card.drawdown .m-value { color: var(--short); }
 .metric-card.winrate .m-value { color: var(--long); }
-.metric-card.factor .m-value { color: var(--amber); }
+/* ---------- MINIMALIST & PREMIUM TAB STYLES ---------- */
+#tab-backtest, #tab-optimizer, #tab-arena {
+  padding: 14px;
+}
 
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 0 12px;
+  background: var(--surface);
+}
+
+.tab {
+  padding: 8px 14px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.tab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tab.active {
+  color: var(--teal);
+  background: linear-gradient(180deg, rgba(0, 224, 184, 0.12) 0%, rgba(0, 224, 184, 0.02) 100%);
+  border: 1px solid rgba(0, 224, 184, 0.3);
+  border-bottom: 2px solid var(--teal);
+  font-weight: 700;
+  box-shadow: 0 4px 12px rgba(0, 224, 184, 0.1);
+}
+
+.tab .count {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+/* Sub-Tabs (Segmented Controls) */
 .res-tabs {
   display: flex;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 8px;
+  border-bottom: none;
+  margin-bottom: 12px;
+  background: var(--surface-2);
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  gap: 4px;
+  flex-wrap: wrap;
 }
+
 .res-tab {
-  padding: 8px 12px;
+  padding: 6px 12px;
   font-size: 11px;
   font-weight: 600;
   background: transparent;
-  color: var(--text-faint);
-  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: 6px;
   cursor: pointer;
+  transition: all 0.2s ease;
 }
-.res-tab.active {
+
+.res-tab:hover {
   color: var(--text);
-  border-color: var(--teal);
+  background: rgba(255, 255, 255, 0.04);
 }
+
+.res-tab.active {
+  color: var(--teal);
+  background: var(--surface-3);
+  border-color: rgba(0, 224, 184, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  font-weight: 700;
+}
+
+/* Modern Card & Panel Glassmorphism */
+.backtest-section, .automl-step-card {
+  background: rgba(18, 25, 36, 0.7);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.backtest-section:hover {
+  border-color: rgba(0, 224, 184, 0.2);
+}
+
+.backtest-sec-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Button & Chip Hover Effects */
+.btn-small, .backtest-btn {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.btn-small:hover:not(:disabled), .backtest-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.btn-small:active:not(:disabled), .backtest-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+/* Tag Badges styling */
+.badge-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--mono);
+  letter-spacing: 0.3px;
+  margin-right: 4px;
+  border: 1px solid transparent;
+}
+
+.badge-tag.ds { background: rgba(0, 224, 184, 0.1); color: var(--teal); border-color: rgba(0, 224, 184, 0.3); }
+.badge-tag.method { background: rgba(121, 40, 202, 0.15); color: #c084fc; border-color: rgba(192, 132, 252, 0.3); }
+.badge-tag.oos { background: rgba(38, 217, 122, 0.12); color: var(--long); border-color: rgba(38, 217, 122, 0.3); }
+.badge-tag.dsr { background: rgba(255, 176, 32, 0.12); color: var(--amber); border-color: rgba(255, 176, 32, 0.3); }
+.badge-tag.veto { background: rgba(255, 92, 114, 0.12); color: var(--short); border-color: rgba(255, 92, 114, 0.3); }
+.badge-tag.regime { background: rgba(56, 189, 248, 0.12); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3); }
+
+/* Table Enhancements */
 .backtest-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 11px;
+  font-family: var(--sans);
+}
+
+.backtest-table th {
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.backtest-table th.num, .backtest-table td.num {
+  text-align: right;
+}
+
+.backtest-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text);
+  vertical-align: middle;
+}
+
+.backtest-table .font-mono {
   font-family: var(--mono);
   font-size: 11px;
 }
-.backtest-table th {
-  text-align: left;
-  color: var(--text-faint);
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-.backtest-table td {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border-soft);
-  color: var(--text-dim);
-}
-.backtest-table tbody tr:hover {
-  background: var(--surface-3);
-}
-.backtest-table tr.clickable {
-  cursor: pointer;
-}
-.backtest-table tr.clickable:hover {
-  color: var(--teal) !important;
-}
-.signal-badge {
-  padding: 1px 3px;
-  border-radius: 3px;
-  font-size: 9px;
-  font-weight: 600;
-  margin-right: 2px;
-  display: inline-block;
-}
-.signal-badge.up { background: var(--long-dim); color: var(--long); }
-.signal-badge.down { background: var(--short-dim); color: var(--short); }
-.signal-badge.neutral { background: var(--surface-3); color: var(--text-faint); }
 
-/* Strategy Rules Editor Styles */
-.rule-row {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  margin-bottom: 4px;
-}
-.rule-select {
-  flex: 1;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 10px;
-  padding: 4px 6px;
-  border-radius: 4px;
-  outline: none;
-  height: 24px;
+.backtest-table tbody tr.clickable {
   cursor: pointer;
 }
-.rule-select:focus {
-  border-color: var(--teal);
+
+.backtest-table tbody tr.clickable:hover, .backtest-table tbody tr:hover {
+  background: rgba(0, 224, 184, 0.05) !important;
 }
-.btn-delete-rule {
-  background: transparent;
-  color: var(--text-dim);
-  border: none;
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0 6px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.15s ease;
+
+.backtest-table tbody tr:nth-child(4n+1) {
+  background: rgba(255, 255, 255, 0.012);
 }
-.btn-delete-rule:hover {
-  color: var(--short);
-}
+
 

@@ -37,14 +37,16 @@ typedef struct {
 } Candle;
 
 typedef struct {
-    int interval_idx; // 0 to 4
+    int interval_idx; // 0 to 9 (Index in g_interval_names / htf_durations)
     int expected_signal; // 1 (bull), -1 (bear)
 } Rule;
 
 typedef struct {
-    Rule longRules[2];
+    // Fix: war vorher [2], obwohl der Triple-Regel-Code bereits auf Index 2
+    // schrieb -> Buffer-Overflow. Jetzt korrekt auf 3 Elemente (nur Triple-TF).
+    Rule longRules[3];
     int longRulesCount;
-    Rule shortRules[2];
+    Rule shortRules[3];
     int shortRulesCount;
     char label[64];
 } RuleSet;
@@ -96,26 +98,37 @@ typedef struct {
 } StrategyEvaluation;
 
 // Global rule sets array
-RuleSet rule_sets[100];
+// Kapazitaet: nur-Triple ueber 10 Timeframes = C(10,3) * 2^3 Vorzeichen-
+// Kombinationen (gemischt bull/bear) = 120 * 8 = 960. Mit Puffer auf 1000.
+#define MAX_RULE_SETS 1000
+RuleSet rule_sets[MAX_RULE_SETS];
 int rule_sets_count = 0;
 
+// Namen der 10 Timeframes, Index muss zu htf_durations / interval_mins passen.
+const char* g_interval_names[10] = {
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h"
+};
+
 // Global pointers for HTF data (not modified, shared read-only across threads)
-Candle* htf_candles[5];
-int htf_counts[5];
-int* htf_signals[5];
-long long htf_durations[5] = { 60000LL, 300000LL, 900000LL, 3600000LL, 14400000LL };
+Candle* htf_candles[10];
+int htf_counts[10];
+int* htf_signals[10];
+long long htf_durations[10] = { 
+    60000LL,     // 1m
+    180000LL,    // 3m
+    300000LL,    // 5m
+    900000LL,    // 15m
+    1800000LL,   // 30m
+    3600000LL,   // 1h
+    7200000LL,   // 2h
+    14400000LL,  // 4h
+    21600000LL,  // 6h
+    43200000LL   // 12h
+};
 
 // Precomputed HTF pointer cache: htf_ptr_cache[tf][candle_index] = correct pointer
-// Eliminates the per-candle while-loop from hot path (computed once, read 2.1M times)
-int* htf_ptr_cache[5];
+int* htf_ptr_cache[10];
 
-// Kompakte Kerzen-Kopie fuer den run_backtest()-Hot-Path: NUR high/low/close
-// (24 statt 48 Bytes wie beim vollen Candle-Struct), aber als EIN
-// zusammenhaengendes Array (kein SoA!). Wichtig: bei getrennten Arrays
-// (SoA) braeuchte jeder Skip-Ahead-Sprung 3 Cache-Misses in 3 verschiedenen
-// Speicherbereichen statt 1 - bei einem Struct-Array bleiben alle drei
-// Felder in derselben Cache-Line, genau wie beim urspruenglichen Candle,
-// nur mit halbem Speicherbedarf.
 typedef struct {
     double high;
     double low;
@@ -130,78 +143,61 @@ typedef struct {
 HLC* g_hlc = NULL;
 HLCBlock16* g_hlc_blocks = NULL;
 
-// Precomputed Rule-Signal pro RuleSet und 1m-Kerze: 0=keins, 1=long, 2=short.
-// Vorher wurde triggerLong/triggerShort (htf_pointers-Gather + Regelvergleich)
-// in run_backtest() für JEDE Parameterkombination neu berechnet, obwohl das
-// Signal nur vom ruleIndex abhaengt. Bei 50 RuleSets x 105000 Kombinationen/RuleSet
-// war das eine ~100000-fache Redundanz. Jetzt: einmal pro RuleSet vorab berechnet.
-unsigned char* rule_side_signal[100];
+unsigned char* rule_side_signal[MAX_RULE_SETS];
+int* rule_next_signal[MAX_RULE_SETS];
 
-// Sprungtabelle pro RuleSet: rule_next_signal[r][i] = kleinster Index j>=i mit
-// sig[j]!=0, sonst count1m. Erlaubt dem Backtest, Leerlauf-Strecken (keine
-// offene Position, kein Signal) in O(1) zu ueberspringen statt Kerze fuer
-// Kerze durchzulaufen. Aequivalent zum Original: waehrend activeTradesCount==0
-// aendert sich weder Balance noch Equity/Drawdown noch Cooldown-Fenster, es
-// wird also nichts uebersehen.
-int* rule_next_signal[100];
-
+// Nur noch Triple-Timeframe-Regeln, aber ueber ALLE 10 Timeframes und ALLE
+// gemischten Bull/Bear-Vorzeichenkombinationen (nicht mehr nur "alle bull"
+// oder "alle bear" wie im urspruenglichen Code).
+//
+// Fuer jedes Tripel von 3 verschiedenen Timeframes (aus 10, ungeordnet:
+// C(10,3) = 120) werden alle 2^3 = 8 Vorzeichen-Muster durchprobiert, z.B.
+// 1m Bull AND 3m Bear AND 1h Bull. Macht 120 * 8 = 960 RuleSets.
+//
+// Die Short-Seite jedes RuleSets ist bewusst das exakte Spiegelbild der
+// Long-Seite (alle Vorzeichen invertiert) -- das entspricht der bisherigen
+// Konvention "Short-Einstieg = Gegenteil des Long-Einstiegs" und wird durch
+// die Vorzeichen-Enumeration der Long-Seite bereits vollstaendig abgedeckt
+// (jedes Spiegelbild-Muster ist selbst auch ein enumeriertes Long-Muster).
 void generate_rule_sets() {
-    const char* intervals[] = {"1m", "5m", "15m", "1h", "4h"};
-    int intervals_count = 5;
-    
-    // 1. Single interval rules (1m, 5m, 15m, 1h, 4h)
-    for (int i = 0; i < intervals_count; i++) {
-        const char* iv = intervals[i];
-        RuleSet* r1 = &rule_sets[rule_sets_count++];
-        r1->longRulesCount = 1;
-        r1->longRules[0].interval_idx = i;
-        r1->longRules[0].expected_signal = 1; // bull
-        r1->shortRulesCount = 1;
-        r1->shortRules[0].interval_idx = i;
-        r1->shortRules[0].expected_signal = -1; // bear
-        sprintf(r1->label, "%s", iv);
-    }
+    const int intervals_count = 10; // g_interval_names / htf_durations
 
-    // 2. Dual interval multi-timeframe rules (e.g. 1m + 5m, 5m + 15m, 15m + 1h, 1h + 4h...)
-    for (int i = 0; i < intervals_count - 1; i++) {
-        for (int j = i + 1; j < intervals_count; j++) {
-            RuleSet* r2 = &rule_sets[rule_sets_count++];
-            r2->longRulesCount = 2;
-            r2->longRules[0].interval_idx = i;
-            r2->longRules[0].expected_signal = 1;
-            r2->longRules[1].interval_idx = j;
-            r2->longRules[1].expected_signal = 1;
-
-            r2->shortRulesCount = 2;
-            r2->shortRules[0].interval_idx = i;
-            r2->shortRules[0].expected_signal = -1;
-            r2->shortRules[1].interval_idx = j;
-            r2->shortRules[1].expected_signal = -1;
-            sprintf(r2->label, "%s + %s", intervals[i], intervals[j]);
-        }
-    }
-
-    // 3. Triple interval multi-timeframe rules (e.g. 1m+5m+15m, 5m+15m+1h, 15m+1h+4h...)
     for (int i = 0; i < intervals_count - 2; i++) {
         for (int j = i + 1; j < intervals_count - 1; j++) {
             for (int k = j + 1; k < intervals_count; k++) {
-                RuleSet* r3 = &rule_sets[rule_sets_count++];
-                r3->longRulesCount = 3;
-                r3->longRules[0].interval_idx = i;
-                r3->longRules[0].expected_signal = 1;
-                r3->longRules[1].interval_idx = j;
-                r3->longRules[1].expected_signal = 1;
-                r3->longRules[2].interval_idx = k;
-                r3->longRules[2].expected_signal = 1;
+                int tf_idx[3] = { i, j, k };
 
-                r3->shortRulesCount = 3;
-                r3->shortRules[0].interval_idx = i;
-                r3->shortRules[0].expected_signal = -1;
-                r3->shortRules[1].interval_idx = j;
-                r3->shortRules[1].expected_signal = -1;
-                r3->shortRules[2].interval_idx = k;
-                r3->shortRules[2].expected_signal = -1;
-                sprintf(r3->label, "%s + %s + %s", intervals[i], intervals[j], intervals[k]);
+                // Alle 8 Kombinationen aus Bull(+1)/Bear(-1) fuer die 3 TFs.
+                for (int mask = 0; mask < 8; mask++) {
+                    int sign[3];
+                    sign[0] = (mask & 1) ? 1 : -1;
+                    sign[1] = (mask & 2) ? 1 : -1;
+                    sign[2] = (mask & 4) ? 1 : -1;
+
+                    RuleSet* r3 = &rule_sets[rule_sets_count++];
+                    r3->longRulesCount = 3;
+                    r3->shortRulesCount = 3;
+
+                    char label_buf[64];
+                    label_buf[0] = '\0';
+
+                    for (int n = 0; n < 3; n++) {
+                        r3->longRules[n].interval_idx = tf_idx[n];
+                        r3->longRules[n].expected_signal = sign[n];
+
+                        // Short-Seite = exaktes Spiegelbild (Vorzeichen invertiert)
+                        r3->shortRules[n].interval_idx = tf_idx[n];
+                        r3->shortRules[n].expected_signal = -sign[n];
+
+                        char part[16];
+                        snprintf(part, sizeof(part), "%s%s",
+                                 g_interval_names[tf_idx[n]],
+                                 (sign[n] == 1) ? "+" : "-");
+                        strcat(label_buf, part);
+                        if (n < 2) strcat(label_buf, " ");
+                    }
+                    snprintf(r3->label, sizeof(r3->label), "%s", label_buf);
+                }
             }
         }
     }
@@ -744,6 +740,26 @@ int compare_strategy_eval(const void* a, const void* b) {
     return 0;
 }
 
+// Min-Heap ueber .score, Groesse `size`, Wurzel (Index 0) = kleinstes Element.
+// Wird pro Thread genutzt, um nur die TOP_K_RESULTS besten Ergebnisse im
+// Speicher zu halten, waehrend trotzdem alle 207 Mio. Kombinationen
+// durchgerechnet werden (kein Datenverlust bei der Suche selbst, nur bei
+// den nicht mehr benoetigten Zwischenergebnissen).
+static void heap_sift_down(StrategyEvaluation* heap, int size, int i) {
+    while (1) {
+        int left = 2 * i + 1;
+        int right = 2 * i + 2;
+        int smallest = i;
+        if (left < size && heap[left].score < heap[smallest].score) smallest = left;
+        if (right < size && heap[right].score < heap[smallest].score) smallest = right;
+        if (smallest == i) break;
+        StrategyEvaluation tmp = heap[i];
+        heap[i] = heap[smallest];
+        heap[smallest] = tmp;
+        i = smallest;
+    }
+}
+
 Candle* load_candles_csv(const char* filepath, int* out_count) {
     FILE* f = fopen(filepath, "r");
     if (!f) {
@@ -810,13 +826,7 @@ void write_strategies_json(const char* filepath, const StrategyEvaluation* evals
         // Print Long rules
         fprintf(f, "        \"long\": [\n");
         for (int r = 0; r < rs->longRulesCount; r++) {
-            const char* iv_str = "";
-            if (rs->longRules[r].interval_idx == 0) iv_str = "1m";
-            else if (rs->longRules[r].interval_idx == 1) iv_str = "5m";
-            else if (rs->longRules[r].interval_idx == 2) iv_str = "15m";
-            else if (rs->longRules[r].interval_idx == 3) iv_str = "1h";
-            else if (rs->longRules[r].interval_idx == 4) iv_str = "4h";
-            
+            const char* iv_str = g_interval_names[rs->longRules[r].interval_idx];
             const char* state_str = (rs->longRules[r].expected_signal == 1) ? "bull" : "bear";
             fprintf(f, "          {\"interval\": \"%s\", \"state\": \"%s\"}%s\n", iv_str, state_str, (r == rs->longRulesCount - 1) ? "" : ",");
         }
@@ -825,13 +835,7 @@ void write_strategies_json(const char* filepath, const StrategyEvaluation* evals
         // Print Short rules
         fprintf(f, "        \"short\": [\n");
         for (int r = 0; r < rs->shortRulesCount; r++) {
-            const char* iv_str = "";
-            if (rs->shortRules[r].interval_idx == 0) iv_str = "1m";
-            else if (rs->shortRules[r].interval_idx == 1) iv_str = "5m";
-            else if (rs->shortRules[r].interval_idx == 2) iv_str = "15m";
-            else if (rs->shortRules[r].interval_idx == 3) iv_str = "1h";
-            else if (rs->shortRules[r].interval_idx == 4) iv_str = "4h";
-            
+            const char* iv_str = g_interval_names[rs->shortRules[r].interval_idx];
             const char* state_str = (rs->shortRules[r].expected_signal == 1) ? "bull" : "bear";
             fprintf(f, "          {\"interval\": \"%s\", \"state\": \"%s\"}%s\n", iv_str, state_str, (r == rs->shortRulesCount - 1) ? "" : ",");
         }
@@ -970,8 +974,9 @@ int main(int argc, char** argv) {
     }
     
     // Precompute HTF candles and signals
-    int interval_mins[5] = {1, 5, 15, 60, 240};
-    for (int i = 0; i < 5; i++) {
+    // Muss zu g_interval_names / htf_durations passen: 1m,3m,5m,15m,30m,1h,2h,4h,6h,12h
+    int interval_mins[10] = {1, 3, 5, 15, 30, 60, 120, 240, 360, 720};
+    for (int i = 0; i < 10; i++) {
         int max_htf_len = count1m / interval_mins[i] + 1;
         htf_candles[i] = safe_malloc(sizeof(Candle) * max_htf_len, "htf_candles[i]");
         htf_counts[i] = aggregate_candles(candles1m, count1m, interval_mins[i], htf_candles[i]);
@@ -983,7 +988,7 @@ int main(int argc, char** argv) {
     }
     
     // Precompute HTF pointer cache (done once, avoids per-backtest while-loops)
-    for (int tf = 0; tf < 5; tf++) {
+    for (int tf = 0; tf < 10; tf++) {
         htf_ptr_cache[tf] = safe_malloc(sizeof(int) * count1m, "htf_ptr_cache[tf]");
         int ptr = -1;
         for (int i = 0; i < count1m; i++) {
@@ -1008,74 +1013,66 @@ int main(int argc, char** argv) {
     precompute_rule_signals(count1m, htf_signals);
     printf("Precomputed rule signals fuer %d RuleSets.\n", rule_sets_count);
     
-    int leverages[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 100};
-    int leverages_count = 24;
+    int leverages[] = {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+    int leverages_count = 16;
     
-    int cooldowns[] = {0, 1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50, 60, 90, 120};
+    int cooldowns[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30};
     int cooldowns_count = 15;
     
-    double tps[] = {1.0, 1.5, 2.0, 2.5, 5.0, 7.5, 10.0, 12.5, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 120.0, 150.0, 200.0};
-    int tps_count = 23;
+    double tps[] = {5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0};
+    int tps_count = 15;
     
-    double sls[] = {1.0, 1.5, 2.0, 2.5, 5.0, 7.5, 10.0, 12.5, 15.0, 17.5, 20.0, 25.0, 30.0, 35.0, 40.0, 50.0, 60.0, 75.0, 100.0};
-    int sls_count = 19;
+    double sls[] = {5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0};
+    int sls_count = 10;
     
-    int max_opens[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20};
-    int max_opens_count = 13;
-
-    // Coarse-Suche Indizes auswaehlen (Phase 1):
-    int leverages_coarse_idx[] = {0, 1, 3, 5, 7, 9, 11, 14, 16, 18, 20, 22, 23}; // 1, 2, 4, 6, 8, 10, 14, 20, 30, 40, 50, 75, 100
-    int leverages_coarse_count = 13;
+    int max_opens[] = {1, 2, 3, 4, 5, 6};
+    int max_opens_count = 6;
     
-    int cooldowns_coarse_idx[] = {0, 1, 3, 5, 7, 9, 11, 12, 14}; // 0, 1, 3, 10, 20, 30, 50, 60, 120
-    int cooldowns_coarse_count = 9;
-    
-    int tps_coarse_idx[] = {0, 1, 3, 6, 8, 10, 13, 15, 17, 19, 21, 22}; // 1.0, 1.5, 2.5, 7.5, 12.5, 20, 35, 50, 70, 90, 150, 200
-    int tps_coarse_count = 12;
-    
-    int sls_coarse_idx[] = {0, 1, 3, 6, 8, 10, 12, 14, 16, 18}; // 1.0, 1.5, 2.5, 7.5, 12.5, 20, 30, 40, 60, 100
-    int sls_coarse_count = 10;
-    
-    int max_opens_coarse_idx[] = {0, 1, 2, 3, 4, 6, 8, 10, 12}; // 1, 2, 3, 4, 5, 7, 9, 12, 20
-    int max_opens_coarse_count = 9;
-    
-    int coarse_combos = rule_sets_count * leverages_coarse_count * cooldowns_coarse_count 
-                      * tps_coarse_count * sls_coarse_count * max_opens_coarse_count;
+    int total_combos = rule_sets_count * leverages_count * cooldowns_count 
+                      * tps_count * sls_count * max_opens_count;
                       
-    printf("Starting Phase 1 (Coarse search) on %d combinations using OpenMP multi-threading...\n", coarse_combos);
+    printf("Starting Exhaustive Grid Search on %d combinations using OpenMP multi-threading...\n", total_combos);
     
-    StrategyEvaluation* evals_coarse = safe_malloc(sizeof(StrategyEvaluation) * coarse_combos, "evals_coarse");
+    // Option 1 (laufendes Top-K): statt ALLER total_combos Ergebnisse im
+    // RAM zu halten (bei 207 Mio. Kombinationen ~30+ GB), haelt jeder Thread
+    // nur einen Min-Heap seiner TOP_K_RESULTS besten Ergebnisse. Alle
+    // Kombinationen werden weiterhin vollstaendig durchgerechnet -- es
+    // aendert sich nur, was danach im Speicher bleibt.
+    const int TOP_K_RESULTS = 500;
+    int max_threads = omp_get_max_threads();
+    StrategyEvaluation** thread_tops = safe_malloc(sizeof(StrategyEvaluation*) * max_threads, "thread_tops");
+    int* thread_top_counts = safe_malloc(sizeof(int) * max_threads, "thread_top_counts");
+    for (int t = 0; t < max_threads; t++) {
+        thread_tops[t] = safe_malloc(sizeof(StrategyEvaluation) * TOP_K_RESULTS, "thread_tops[t]");
+        thread_top_counts[t] = 0;
+    }
     
     double start_time = omp_get_wtime();
     int progress_counter = 0;
-    int progress_step = coarse_combos / 100;
+    int progress_step = total_combos / 100;
     if (progress_step < 100) progress_step = 100;
     const int PROGRESS_BATCH = 256;
     
     #pragma omp parallel
     {
+        int tid = omp_get_thread_num();
+        StrategyEvaluation* local_top = thread_tops[tid];
+        int local_count = 0;
         int local_progress = 0;
         
         #pragma omp for collapse(6) schedule(dynamic, 64)
         for (int r = 0; r < rule_sets_count; r++) {
-            for (int l = 0; l < leverages_coarse_count; l++) {
-                for (int cd = 0; cd < cooldowns_coarse_count; cd++) {
-                    for (int tp = 0; tp < tps_coarse_count; tp++) {
-                        for (int sl = 0; sl < sls_coarse_count; sl++) {
-                            for (int mo = 0; mo < max_opens_coarse_count; mo++) {
-                                int idx = r * (leverages_coarse_count * cooldowns_coarse_count * tps_coarse_count * sls_coarse_count * max_opens_coarse_count)
-                                        + l * (cooldowns_coarse_count * tps_coarse_count * sls_coarse_count * max_opens_coarse_count)
-                                        + cd * (tps_coarse_count * sls_coarse_count * max_opens_coarse_count)
-                                        + tp * (sls_coarse_count * max_opens_coarse_count)
-                                        + sl * max_opens_coarse_count
-                                        + mo;
-                                        
+            for (int l = 0; l < leverages_count; l++) {
+                for (int cd = 0; cd < cooldowns_count; cd++) {
+                    for (int tp = 0; tp < tps_count; tp++) {
+                        for (int sl = 0; sl < sls_count; sl++) {
+                            for (int mo = 0; mo < max_opens_count; mo++) {
                                 StrategyParams params;
-                                params.leverage = leverages[leverages_coarse_idx[l]];
-                                params.cooldownMin = cooldowns[cooldowns_coarse_idx[cd]];
-                                params.tpPercent = tps[tps_coarse_idx[tp]];
-                                params.slPercent = sls[sls_coarse_idx[sl]];
-                                params.maxOpen = max_opens[max_opens_coarse_idx[mo]];
+                                params.leverage = leverages[l];
+                                params.cooldownMin = cooldowns[cd];
+                                params.tpPercent = tps[tp];
+                                params.slPercent = sls[sl];
+                                params.maxOpen = max_opens[mo];
                                 params.ruleIndex = r;
                                 
                                 BacktestResult res = run_backtest(
@@ -1093,9 +1090,27 @@ int main(int argc, char** argv) {
                                     rule_next_signal[r]
                                 );
                                 
-                                evals_coarse[idx].params = params;
-                                evals_coarse[idx].results = res;
-                                evals_coarse[idx].score = calculate_score(&res);
+                                StrategyEvaluation ev;
+                                ev.params = params;
+                                ev.results = res;
+                                ev.score = calculate_score(&res);
+                                
+                                // Laufendes Top-K per Min-Heap: solange der
+                                // lokale Puffer noch nicht voll ist, einfach
+                                // anhaengen; danach nur ersetzen, wenn besser
+                                // als das aktuell schlechteste Element (Wurzel).
+                                if (local_count < TOP_K_RESULTS) {
+                                    local_top[local_count] = ev;
+                                    local_count++;
+                                    if (local_count == TOP_K_RESULTS) {
+                                        for (int hi = TOP_K_RESULTS / 2 - 1; hi >= 0; hi--) {
+                                            heap_sift_down(local_top, TOP_K_RESULTS, hi);
+                                        }
+                                    }
+                                } else if (ev.score > local_top[0].score) {
+                                    local_top[0] = ev;
+                                    heap_sift_down(local_top, TOP_K_RESULTS, 0);
+                                }
                                 
                                 local_progress++;
                                 if (local_progress >= PROGRESS_BATCH) {
@@ -1104,8 +1119,8 @@ int main(int argc, char** argv) {
                                     gc = progress_counter += local_progress;
                                     int prevGc = gc - local_progress;
                                     local_progress = 0;
-                                    if (gc / progress_step != prevGc / progress_step || gc >= coarse_combos) {
-                                        printf("PROGRESS: %.1f%%\n", (double)gc * 15.0 / coarse_combos);
+                                    if (gc / progress_step != prevGc / progress_step || gc >= total_combos) {
+                                        printf("PROGRESS: %.1f%%\n", (double)gc * 100.0 / total_combos);
                                         fflush(stdout);
                                     }
                                 }
@@ -1120,174 +1135,41 @@ int main(int argc, char** argv) {
             int gc;
             #pragma omp atomic capture
             gc = progress_counter += local_progress;
-            if (gc >= coarse_combos) {
-                printf("PROGRESS: %.1f%%\n", (double)gc * 15.0 / coarse_combos);
+            if (gc >= total_combos) {
+                printf("PROGRESS: %.1f%%\n", (double)gc * 100.0 / total_combos);
                 fflush(stdout);
             }
         }
+        
+        thread_top_counts[tid] = local_count;
     }
     
-    printf("Finished Phase 1 in %.3f seconds. Sorting coarse results...\n", omp_get_wtime() - start_time);
-    qsort(evals_coarse, coarse_combos, sizeof(StrategyEvaluation), compare_strategy_eval);
+    printf("Finished Grid Search in %.3f seconds. Merging per-thread Top-%d results...\n", omp_get_wtime() - start_time, TOP_K_RESULTS);
     
-    int top_k = (coarse_combos < 200) ? coarse_combos : 200;
+    // Alle Thread-lokalen Top-K-Puffer zusammenfuehren (max_threads * TOP_K_RESULTS
+    // Elemente, z.B. 16 * 500 = 8000 -- trivial klein) und final sortieren.
+    int merged_count = 0;
+    for (int t = 0; t < max_threads; t++) merged_count += thread_top_counts[t];
     
-    // Generate fine neighborhoods for top_k candidates by shifting indices in the full grids
-    // Leverage neighborhood: baseIdx - 1, baseIdx, baseIdx + 1 (3 steps)
-    // Cooldown neighborhood: baseIdx - 1, baseIdx, baseIdx + 1 (3 steps)
-    // TP neighborhood: baseIdx - 2, baseIdx - 1, baseIdx, baseIdx + 1, baseIdx + 2 (5 steps)
-    // SL neighborhood: baseIdx - 1, baseIdx, baseIdx + 1 (3 steps)
-    // MaxOpen neighborhood: baseIdx - 1, baseIdx, baseIdx + 1 (3 steps)
-    // Total: 3 * 3 * 5 * 3 * 3 = 405 potential combinations per seed candidate
-    int max_potential = top_k * 405;
-    CandidateCombo* potential_combos = safe_malloc(sizeof(CandidateCombo) * max_potential, "potential_combos");
-    int potential_count = 0;
-    
-    for (int k = 0; k < top_k; k++) {
-        StrategyParams base = evals_coarse[k].params;
-        
-        int base_lev_idx = find_idx_int(base.leverage, leverages, leverages_count);
-        int base_cd_idx = find_idx_int(base.cooldownMin, cooldowns, cooldowns_count);
-        int base_tp_idx = find_idx_double(base.tpPercent, tps, tps_count);
-        int base_sl_idx = find_idx_double(base.slPercent, sls, sls_count);
-        int base_mo_idx = find_idx_int(base.maxOpen, max_opens, max_opens_count);
-        
-        for (int dl = -1; dl <= 1; dl++) {
-            int l_idx = base_lev_idx + dl;
-            if (l_idx < 0) l_idx = 0;
-            if (l_idx >= leverages_count) l_idx = leverages_count - 1;
-            int lev = leverages[l_idx];
-            
-            for (int dc = -1; dc <= 1; dc++) {
-                int c_idx = base_cd_idx + dc;
-                if (c_idx < 0) c_idx = 0;
-                if (c_idx >= cooldowns_count) c_idx = cooldowns_count - 1;
-                int cd = cooldowns[c_idx];
-                
-                for (int dt = -2; dt <= 2; dt++) {
-                    int t_idx = base_tp_idx + dt;
-                    if (t_idx < 0) t_idx = 0;
-                    if (t_idx >= tps_count) t_idx = tps_count - 1;
-                    double tp = tps[t_idx];
-                    
-                    for (int ds = -1; ds <= 1; ds++) {
-                        int s_idx = base_sl_idx + ds;
-                        if (s_idx < 0) s_idx = 0;
-                        if (s_idx >= sls_count) s_idx = sls_count - 1;
-                        double sl = sls[s_idx];
-                        
-                        for (int dm = -1; dm <= 1; dm++) {
-                            int m_idx = base_mo_idx + dm;
-                            if (m_idx < 0) m_idx = 0;
-                            if (m_idx >= max_opens_count) m_idx = max_opens_count - 1;
-                            int mo = max_opens[m_idx];
-                            
-                            StrategyParams p;
-                            p.ruleIndex = base.ruleIndex;
-                            p.leverage = lev;
-                            p.cooldownMin = cd;
-                            p.tpPercent = tp;
-                            p.slPercent = sl;
-                            p.maxOpen = mo;
-                            
-                            CandidateCombo combo;
-                            combo.params = p;
-                            combo.key = encode_params(&p);
-                            
-                            potential_combos[potential_count++] = combo;
-                        }
-                    }
-                }
-            }
-        }
+    StrategyEvaluation* merged_top = safe_malloc(sizeof(StrategyEvaluation) * merged_count, "merged_top");
+    int offset = 0;
+    for (int t = 0; t < max_threads; t++) {
+        memcpy(merged_top + offset, thread_tops[t], sizeof(StrategyEvaluation) * thread_top_counts[t]);
+        offset += thread_top_counts[t];
     }
     
-    printf("Generated %d potential combinations for Phase 2. Sorting and deduplicating...\n", potential_count);
-    qsort(potential_combos, potential_count, sizeof(CandidateCombo), compare_candidate_combo);
+    qsort(merged_top, merged_count, sizeof(StrategyEvaluation), compare_strategy_eval);
     
-    int unique_count = 0;
-    CandidateCombo* unique_combos = safe_malloc(sizeof(CandidateCombo) * potential_count, "unique_combos");
-    for (int i = 0; i < potential_count; i++) {
-        if (i == 0 || potential_combos[i].key != potential_combos[i - 1].key) {
-            unique_combos[unique_count++] = potential_combos[i];
-        }
-    }
-    free(potential_combos);
-    printf("Found %d unique combinations for Phase 2.\n", unique_count);
-    
-    printf("Starting Phase 2 (Fine search) on %d combinations using OpenMP multi-threading...\n", unique_count);
-    StrategyEvaluation* evals_fine = safe_malloc(sizeof(StrategyEvaluation) * unique_count, "evals_fine");
-    
-    int fine_progress_counter = 0;
-    int fine_progress_step = unique_count / 100;
-    if (fine_progress_step < 100) fine_progress_step = 100;
-    
-    #pragma omp parallel
-    {
-        int local_progress = 0;
-        
-        #pragma omp for schedule(dynamic, 64)
-        for (int i = 0; i < unique_count; i++) {
-            StrategyParams params = unique_combos[i].params;
-            
-            BacktestResult res = run_backtest(
-                g_hlc, count1m,
-                startBalanceSats,
-                qtyUsd,
-                params.leverage,
-                params.cooldownMin,
-                params.maxOpen,
-                params.tpPercent,
-                params.slPercent,
-                feeRate,
-                spread,
-                rule_side_signal[params.ruleIndex],
-                rule_next_signal[params.ruleIndex]
-            );
-            
-            evals_fine[i].params = params;
-            evals_fine[i].results = res;
-            evals_fine[i].score = calculate_score(&res);
-            
-            local_progress++;
-            if (local_progress >= PROGRESS_BATCH) {
-                int gc;
-                #pragma omp atomic capture
-                gc = fine_progress_counter += local_progress;
-                int prevGc = gc - local_progress;
-                local_progress = 0;
-                if (gc / fine_progress_step != prevGc / fine_progress_step || gc >= unique_count) {
-                    printf("PROGRESS: %.1f%%\n", 15.0 + (double)gc * 85.0 / unique_count);
-                    fflush(stdout);
-                }
-            }
-        }
-        
-        if (local_progress > 0) {
-            int gc;
-            #pragma omp atomic capture
-            gc = fine_progress_counter += local_progress;
-            if (gc >= unique_count) {
-                printf("PROGRESS: %.1f%%\n", 15.0 + (double)gc * 85.0 / unique_count);
-                fflush(stdout);
-            }
-        }
-    }
-    
-    double end_time = omp_get_wtime();
-    printf("Finished Phase 2 in %.3f seconds. Sorting fine results...\n", end_time - start_time);
-    
-    qsort(evals_fine, unique_count, sizeof(StrategyEvaluation), compare_strategy_eval);
-    
-    int output_count = (unique_count < 200) ? unique_count : 200;
+    int output_count = (merged_count < TOP_K_RESULTS) ? merged_count : TOP_K_RESULTS;
     printf("Writing top %d strategies to %s...\n", output_count, output_path);
-    write_strategies_json(output_path, evals_fine, output_count, rule_sets, market);
+    write_strategies_json(output_path, merged_top, output_count, rule_sets, market);
     
     // Cleanup
-    free(evals_coarse);
-    free(unique_combos);
-    free(evals_fine);
-    for (int i = 0; i < 5; i++) {
+    free(merged_top);
+    for (int t = 0; t < max_threads; t++) free(thread_tops[t]);
+    free(thread_tops);
+    free(thread_top_counts);
+    for (int i = 0; i < 10; i++) {
         free(htf_candles[i]);
         free(htf_signals[i]);
         free(htf_ptr_cache[i]);
@@ -1297,7 +1179,6 @@ int main(int argc, char** argv) {
         free(rule_next_signal[r]);
     }
     free(g_hlc);
-    
     printf("Done.\n");
     return 0;
 }

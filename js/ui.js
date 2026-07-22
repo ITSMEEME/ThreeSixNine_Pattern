@@ -470,11 +470,120 @@ App.UI = {
 
     document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
-      ['positions','orders','history','backtest'].forEach(name => {
+      ['positions','orders','history','backtest','optimizer','arena'].forEach(name => {
         const tabEl = document.getElementById('tab-' + name);
-        if (tabEl) tabEl.style.display = (name === t.dataset.tab) ? 'block' : 'none';
+        if (tabEl) {
+          const isTarget = (name === t.dataset.tab);
+          if (['backtest', 'optimizer', 'arena'].includes(name)) {
+            tabEl.style.display = isTarget ? 'flex' : 'none';
+          } else {
+            tabEl.style.display = isTarget ? 'block' : 'none';
+          }
+        }
       });
+
+      if (t.dataset.tab === 'optimizer') {
+        if (App.Backtest && typeof App.Backtest.renderCacheList === 'function') {
+          App.Backtest.renderCacheList();
+        }
+        const activeResTab = document.querySelector('#tab-optimizer .res-tab.active') || document.querySelector('#tab-optimizer .res-tab[data-res-tab="leaderboard"]');
+        if (activeResTab) {
+          document.querySelectorAll('#tab-optimizer .res-tab').forEach(x => x.classList.toggle('active', x === activeResTab));
+          const resTabName = activeResTab.dataset.resTab || 'leaderboard';
+          ['leaderboard', 'heatmaps', 'wissensstand', 'robust-combinations'].forEach(name => {
+            const el = document.getElementById('res-tab-' + name);
+            if (el) el.style.display = (name === resTabName) ? 'block' : 'none';
+          });
+        }
+        const filterVal = document.getElementById('leaderboard-filter')?.value || 'all';
+        App.UI.renderLeaderboard(filterVal);
+        App.UI.renderRobustCombinations();
+      } else if (t.dataset.tab === 'backtest') {
+        const activeResTab = document.querySelector('#tab-backtest .res-tab.active') || document.querySelector('#tab-backtest .res-tab[data-res-tab="trades"]');
+        if (activeResTab) {
+          document.querySelectorAll('#tab-backtest .res-tab').forEach(x => x.classList.toggle('active', x === activeResTab));
+          const resTabName = activeResTab.dataset.resTab || 'trades';
+          ['trades', 'saved-profiles'].forEach(name => {
+            const el = document.getElementById('res-tab-' + name);
+            if (el) el.style.display = (name === resTabName) ? 'block' : 'none';
+          });
+        }
+      } else if (t.dataset.tab === 'arena') {
+        if (App.UI && App.UI.renderArenaTab) App.UI.renderArenaTab();
+      }
     }));
+
+    const importOptBtn = document.getElementById('btn-import-best-optimizer');
+    if (importOptBtn) {
+      importOptBtn.addEventListener('click', () => this.loadTopRankingIntoBot('optimizer'));
+    }
+    const importArenaBtn = document.getElementById('btn-import-best-arena');
+    if (importArenaBtn) {
+      importArenaBtn.addEventListener('click', () => this.loadTopRankingIntoBot('arena'));
+    }
+
+    const runArenaBtn = document.getElementById('btn-arena-tab-run-eval');
+    if (runArenaBtn) {
+      runArenaBtn.addEventListener('click', () => this.handleStartArenaEvaluation());
+    }
+
+    const regArenaBtn = document.getElementById('btn-arena-tab-register-current');
+    if (regArenaBtn) {
+      regArenaBtn.addEventListener('click', () => {
+        const b = App.state.bot;
+        const params = {
+          leverage: b.leverage || 10,
+          cooldownMin: b.cooldownMin || 10,
+          tpPercent: b.tpPercent || 50,
+          slPercent: b.slPercent || 25,
+          maxOpen: b.maxOpen || 6,
+          rules: App.state.rules
+        };
+        const sys = App.Arena.registerSystem(params, b.veto, b.mlVeto);
+        if (sys) {
+          App.UI.showToast(`System "${sys.label}" in Arena registriert!`);
+          this.renderArenaTab();
+        }
+      });
+    }
+
+    const stopArenaBtn = document.getElementById('btn-arena-tab-stop');
+    if (stopArenaBtn) {
+      stopArenaBtn.addEventListener('click', () => {
+        App.Arena.stopEvaluation();
+        App.UI.showToast('Arena-Evaluation abgebrochen.');
+      });
+    }
+
+    const importTopArenaBtn = document.getElementById('btn-arena-tab-import-top');
+    if (importTopArenaBtn) {
+      importTopArenaBtn.addEventListener('click', () => {
+        const topCandidates = App.Optimizer ? App.Optimizer.getLeaderboard('all') : [];
+        if (topCandidates && topCandidates.length > 0) {
+          let count = 0;
+          topCandidates.slice(0, 10).forEach(item => {
+            const sys = App.Arena.registerSystem(item.params, item.veto, item.mlVeto);
+            if (sys) count++;
+          });
+          App.UI.showToast(`📥 ${count} Top-Strategie-Profile aus Auto-ML in Arena registriert!`);
+          this.renderArenaTab();
+        } else {
+          const b = App.state.bot;
+          [5, 10, 15, 20].forEach(lev => {
+            App.Arena.registerSystem({
+              leverage: lev,
+              cooldownMin: b.cooldownMin || 10,
+              tpPercent: b.tpPercent || 30,
+              slPercent: b.slPercent || 15,
+              maxOpen: b.maxOpen || 6,
+              rules: App.state.rules
+            }, b.veto, b.mlVeto, `Bot-Strategie (${lev}x Hebel)`);
+          });
+          App.UI.showToast('⚡ Aktuelles Bot-Profil + 4 Hebel-Varianten in Arena registriert!');
+          this.renderArenaTab();
+        }
+      });
+    }
 
     const saveBtn = document.getElementById('btn-save');
     const loadBtn = document.getElementById('btn-load');
@@ -819,6 +928,125 @@ App.UI = {
         }
       });
     }
+
+    // Dedicated Arena Tab Button Event Listeners
+    const btnRegisterArena = document.getElementById('btn-arena-tab-register-current');
+    if (btnRegisterArena) {
+      btnRegisterArena.addEventListener('click', () => {
+        const params = {
+          leverage: App.state.bot.leverage,
+          cooldownMin: App.state.bot.cooldownMin,
+          tpPercent: App.state.bot.tpPercent,
+          slPercent: App.state.bot.slPercent,
+          maxOpen: App.state.bot.maxOpen,
+          rules: JSON.parse(JSON.stringify(App.state.rules))
+        };
+        const veto = App.state.bot.veto.enabled ? App.state.bot.veto : null;
+        const mlVeto = App.state.bot.mlVeto.enabled ? App.state.bot.mlVeto : null;
+
+        const system = App.Arena.registerSystem(params, veto, mlVeto);
+        if (system) {
+          App.UI.showToast(`Arena-System "${system.label}" registriert!`);
+          this.renderArenaTab();
+        }
+      });
+    }
+
+    const btnRunArenaEval = document.getElementById('btn-arena-tab-run-eval');
+    if (btnRunArenaEval) {
+      btnRunArenaEval.addEventListener('click', async () => {
+        let datasets = [];
+        if (App.state.optimizerDatasets && App.state.optimizerDatasets.length >= 2) {
+          for (const dsKey of App.state.optimizerDatasets) {
+            const cached = await App.DB.get(dsKey);
+            if (cached && cached.candles) {
+              datasets.push({ key: dsKey, label: cached.rangeLabel || cached.symbol || dsKey, candles: cached.candles });
+            }
+          }
+        }
+
+        if (datasets.length < 2) {
+          App.UI.showToast('Hinweis: Wähle im Backtest-Tab unter "Multi-Dataset Optimierung" mindestens 2 Datensätze aus.', true);
+          return;
+        }
+
+        const params = {
+          leverage: App.state.bot.leverage,
+          cooldownMin: App.state.bot.cooldownMin,
+          tpPercent: App.state.bot.tpPercent,
+          slPercent: App.state.bot.slPercent,
+          maxOpen: App.state.bot.maxOpen,
+          rules: JSON.parse(JSON.stringify(App.state.rules))
+        };
+        const veto = App.state.bot.veto.enabled ? App.state.bot.veto : null;
+        const mlVeto = App.state.bot.mlVeto.enabled ? App.state.bot.mlVeto : null;
+        const system = App.Arena.registerSystem(params, veto, mlVeto);
+
+        const progContainer = document.getElementById('arena-tab-progress-container');
+        const progText = document.getElementById('arena-tab-progress-text');
+        const progBar = document.getElementById('arena-tab-progress-bar');
+        if (progContainer) progContainer.style.display = 'block';
+
+        try {
+          await App.Arena.runFullArenaEvaluation(system.systemId, datasets, (info) => {
+            if (progText) progText.innerText = `Rotation ${info.rotation}/${info.total}: Holdout ${info.holdoutLabel} (${info.percent}%)`;
+            if (progBar) progBar.style.width = `${info.percent}%`;
+          });
+          App.UI.showToast(`Leave-One-Out Evaluation für "${system.label}" abgeschlossen!`);
+        } catch (err) {
+          App.UI.showToast(`Arena-Fehler: ${err.message}`, true);
+        } finally {
+          if (progContainer) progContainer.style.display = 'none';
+          this.renderArenaTab();
+        }
+      });
+    }
+
+    const btnArenaBackfill = document.getElementById('btn-arena-tab-backfill');
+    if (btnArenaBackfill) {
+      btnArenaBackfill.addEventListener('click', async () => {
+        let datasets = [];
+        if (App.state.optimizerDatasets && App.state.optimizerDatasets.length >= 2) {
+          for (const dsKey of App.state.optimizerDatasets) {
+            const cached = await App.DB.get(dsKey);
+            if (cached && cached.candles) {
+              datasets.push({ key: dsKey, label: cached.rangeLabel || cached.symbol || dsKey, candles: cached.candles });
+            }
+          }
+        }
+
+        if (datasets.length < 2) {
+          App.UI.showToast('Hinweis: Wähle im Backtest-Tab unter "Multi-Dataset Optimierung" mindestens 2 Datensätze aus.', true);
+          return;
+        }
+
+        const progContainer = document.getElementById('arena-tab-progress-container');
+        const progText = document.getElementById('arena-tab-progress-text');
+        const progBar = document.getElementById('arena-tab-progress-bar');
+        if (progContainer) progContainer.style.display = 'block';
+
+        try {
+          await App.Arena.backfillAllSystems(datasets, (info) => {
+            if (progText) progText.innerText = `Backfill ${info.step}/${info.total}: System "${info.systemLabel}" (${info.percent}%)`;
+            if (progBar) progBar.style.width = `${info.percent}%`;
+          });
+          App.UI.showToast('Arena Backfill für alle Systeme erfolgreich abgeschlossen!');
+        } catch (err) {
+          App.UI.showToast(`Backfill-Fehler: ${err.message}`, true);
+        } finally {
+          if (progContainer) progContainer.style.display = 'none';
+          this.renderArenaTab();
+        }
+      });
+    }
+
+    const btnArenaStop = document.getElementById('btn-arena-tab-stop');
+    if (btnArenaStop) {
+      btnArenaStop.addEventListener('click', () => {
+        App.Arena.stopEvaluation();
+        App.UI.showToast('Arena Evaluation wird gestoppt...');
+      });
+    }
   },
 
   // Renders the active Veto/ML-filter information panel for:
@@ -1052,7 +1280,7 @@ App.UI = {
     }
 
     const viewMode = document.getElementById('leaderboard-view-mode')?.value || 'profiles';
-    
+
     if (viewMode === 'profiles') {
       // Top 20 completed strategy profiles
       let profileList = list.filter(item => (item.mlVeto && item.mlVeto.model) || (item.veto && item.veto.enabled));
@@ -1279,18 +1507,18 @@ App.UI = {
 
       return `
         <tr class="clickable lb-toggle-row" data-target="${rowId}">
-          <td style="font-weight: bold; color: ${scoreColor};" title="${item.rawScore !== undefined ? 'Roh-Score: ' + item.rawScore : ''}">${displayScore}</td>
-          <td style="font-size: 8px; white-space: nowrap; letter-spacing: 0.3px;">${badgeParts.join(' ')}</td>
-          <td style="font-size: 9px; white-space: nowrap;">${App.Optimizer.getRuleLabel(rules)} ▾</td>
-          <td>${item.params.leverage}x</td>
-          <td>${item.params.cooldownMin}m</td>
-          <td>${item.params.tpPercent}%</td>
-          <td>${item.params.slPercent}%</td>
-          <td>${item.params.maxOpen || 1}</td>
-          <td class="side ${returnCls}">${item.results.totalReturnPercent >= 0 ? '+' : ''}${item.results.totalReturnPercent.toFixed(2)}%</td>
-          <td>${item.results.winRatePercent.toFixed(1)}%</td>
-          <td class="side short">${item.results.maxDrawdownPercent.toFixed(2)}%</td>
-          <td>${item.results.totalTrades}</td>
+          <td style="font-weight: bold; color: ${scoreColor}; font-size: 13px;" title="${item.rawScore !== undefined ? 'Roh-Score: ' + item.rawScore : ''}">${displayScore}</td>
+          <td><div style="display: flex; gap: 3px; flex-wrap: wrap; align-items: center;">${badgeParts.join('')}</div></td>
+          <td style="font-size: 10px; font-weight: 600; color: var(--text-dim); white-space: nowrap;">${App.Optimizer.getRuleLabel(rules)} <span style="font-size:8px; color:var(--text-faint);">▾</span></td>
+          <td class="num font-mono">${item.params.leverage}x</td>
+          <td class="num font-mono">${item.params.cooldownMin}m</td>
+          <td class="num font-mono">${item.params.tpPercent}%</td>
+          <td class="num font-mono">${item.params.slPercent}%</td>
+          <td class="num font-mono">${item.params.maxOpen || 1}</td>
+          <td class="num font-mono side ${returnCls}">${item.results.totalReturnPercent >= 0 ? '+' : ''}${item.results.totalReturnPercent.toFixed(2)}%</td>
+          <td class="num font-mono">${item.results.winRatePercent.toFixed(1)}%</td>
+          <td class="num font-mono side short">${item.results.maxDrawdownPercent.toFixed(2)}%</td>
+          <td class="num font-mono">${item.results.totalTrades}</td>
         </tr>
         <tr id="${rowId}" class="lb-detail-row" style="display:none;">
           <td colspan="12" style="background: var(--surface-3); padding: 10px; font-size: 10px; line-height: 1.6;">
@@ -1422,6 +1650,429 @@ App.UI = {
         if (App.state.bot.mlVeto.enabled) extras.push('ML-Modell');
         const extraStr = extras.length > 0 ? ` + ${extras.join(' + ')}` : '';
         App.UI.showToast(`Übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}${extraStr}`);
+      });
+    });
+  },
+
+  unwrapCandles(raw) {
+    if (!raw) return null;
+    if (Array.isArray(raw)) return raw;
+    if (raw.candles && Array.isArray(raw.candles)) return raw.candles;
+    return null;
+  },
+
+  async getAvailableArenaDatasets() {
+    let index = await App.Backtest.getCacheIndex();
+    index = index ? [...index] : [];
+
+    const datasets = [];
+
+    if (index.length > 0) {
+      for (const entry of index) {
+        let loadedCandles = null;
+        try {
+          const raw = await App.DB.get(entry.key);
+          loadedCandles = this.unwrapCandles(raw);
+        } catch (e) { /* ignore */ }
+
+        const days = entry.days || (loadedCandles ? Math.round(loadedCandles.length / 1440) : 365);
+        const fromTime = entry.fromTime || (loadedCandles && loadedCandles[0] ? loadedCandles[0].time : 0);
+        const toTime = entry.toTime || (loadedCandles && loadedCandles[loadedCandles.length - 1] ? loadedCandles[loadedCandles.length - 1].time : 0);
+        const rangeLabel = (fromTime && toTime) ? `${App.Backtest.formatDateShort(fromTime)}–${App.Backtest.formatDateShort(toTime)}` : `${days}T`;
+
+        datasets.push({
+          key: entry.key,
+          symbol: entry.symbol || 'BTCUSDT',
+          days: days,
+          fromTime: fromTime,
+          toTime: toTime,
+          label: `${entry.symbol || 'BTCUSDT'} · ${days}T · ${rangeLabel}`,
+          virtualCandles: loadedCandles
+        });
+      }
+    }
+
+    if (datasets.length === 0 && App.state.backtestCandles && App.state.backtestCandles.length > 0) {
+      const candles = App.state.backtestCandles;
+      const first = candles[0].time;
+      const last = candles[candles.length - 1].time;
+      const totalDays = Math.round((last - first) / 86400);
+
+      datasets.push({
+        key: 'active_backtest_candles',
+        symbol: App.state.symbol || 'BTCUSDT',
+        days: Math.max(1, totalDays),
+        fromTime: first,
+        toTime: last,
+        label: `Aktiver Backtest-Datensatz (${totalDays}T)`,
+        virtualCandles: candles
+      });
+    }
+
+    return datasets;
+  },
+
+  async renderArenaDatasetSelection() {
+    const container = document.getElementById('arena-tab-datasets-selection');
+    const availableEntries = await this.getAvailableArenaDatasets();
+    if (!availableEntries || availableEntries.length === 0) {
+      if (container) {
+        container.innerHTML = `<div style="font-size: 10px; color: var(--text-faint); font-style: italic; padding: 6px;">Keine Datensätze geladen. Lade zuerst Kerzen-Historie in Tab 1 ("1. Einzel-Backtest").</div>`;
+      }
+      this.updateArenaDatasetSummary([]);
+      return;
+    }
+
+    const availableKeys = availableEntries.map(e => e.key);
+
+    if (!App.state.arenaDatasets || !Array.isArray(App.state.arenaDatasets) || App.state.arenaDatasets.length === 0) {
+      App.state.arenaDatasets = [...availableKeys];
+    } else {
+      const validSelected = App.state.arenaDatasets.filter(k => availableKeys.includes(k));
+      if (validSelected.length === 0) {
+        App.state.arenaDatasets = [...availableKeys];
+      } else {
+        App.state.arenaDatasets = validSelected;
+      }
+    }
+
+    if (container) {
+      container.innerHTML = availableEntries.map(e => {
+        const isChecked = App.state.arenaDatasets.includes(e.key);
+        const rangeLabel = (e.fromTime && e.toTime) ? `${App.Backtest.formatDateShort(e.fromTime)} – ${App.Backtest.formatDateShort(e.toTime)}` : `${e.days}T`;
+        return `
+          <label style="display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:10px; padding:6px 8px; border-radius:4px; background:var(--surface-2); border:1px solid ${isChecked ? 'var(--teal)' : 'var(--border-soft)'}; cursor:pointer;">
+            <div style="display:flex; align-items:center; gap:8px; overflow:hidden;">
+              <input type="checkbox" class="arena-ds-checkbox" data-key="${e.key}" ${isChecked ? 'checked' : ''}>
+              <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:${isChecked ? 'var(--teal)' : 'var(--text-dim)'}; font-weight:600;">
+                <strong>${e.symbol || 'BTCUSDT'}</strong> &middot; ${e.days}T &middot; ${rangeLabel}
+              </span>
+            </div>
+            <span style="font-size:8px; padding:1px 5px; border-radius:3px; background:rgba(255,255,255,0.05); color:var(--text-faint);">💾 Cache</span>
+          </label>
+        `;
+      }).join('');
+
+      container.querySelectorAll('.arena-ds-checkbox').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const key = cb.dataset.key;
+          if (cb.checked) {
+            if (!App.state.arenaDatasets.includes(key)) App.state.arenaDatasets.push(key);
+          } else {
+            App.state.arenaDatasets = App.state.arenaDatasets.filter(k => k !== key);
+          }
+          this.updateArenaDatasetSummary(availableEntries);
+          App.saveToLocalStorage();
+        });
+      });
+    }
+
+    this.updateArenaDatasetSummary(availableEntries);
+  },
+
+  updateArenaDatasetSummary(availableEntries) {
+    const summary = document.getElementById('arena-tab-selected-summary');
+    if (!summary) return;
+    const selectedKeys = App.state.arenaDatasets || [];
+    const selectedEntries = (availableEntries || []).filter(e => selectedKeys.includes(e.key));
+
+    if (selectedEntries.length === 0) {
+      summary.innerHTML = `<span style="color:var(--short); font-weight:bold;">⚠ Keine Datensätze gewählt. Wähle mindestens 2 Datensätze für Arena-Training.</span>`;
+    } else {
+      const totalDays = selectedEntries.reduce((acc, e) => acc + (e.days || 0), 0);
+      summary.innerHTML = `<div style="font-weight:700; color:var(--teal); margin-bottom:2px;">📊 Evaluierungs-Basis:</div><strong>${selectedEntries.length} Datensätze ausgewählt</strong> (${totalDays} Tage Historie) für Arena-Training.`;
+    }
+  },
+
+  async handleStartArenaEvaluation() {
+    const availableEntries = await this.getAvailableArenaDatasets();
+    const availableKeys = availableEntries.map(e => e.key);
+
+    if (!App.state.arenaDatasets || !Array.isArray(App.state.arenaDatasets) || App.state.arenaDatasets.length === 0) {
+      App.state.arenaDatasets = [...availableKeys];
+    } else {
+      App.state.arenaDatasets = App.state.arenaDatasets.filter(k => availableKeys.includes(k));
+      if (App.state.arenaDatasets.length === 0) {
+        App.state.arenaDatasets = [...availableKeys];
+      }
+    }
+
+    const selectedKeys = App.state.arenaDatasets;
+    const selectedEntries = availableEntries.filter(e => selectedKeys.includes(e.key));
+
+    if (selectedEntries.length < 2) {
+      App.UI.showToast('Bitte wähle mindestens 2 Datensätze oder Jahresscheiben für das Arena-LOO-Training aus.');
+      return;
+    }
+
+    if (!App.state.arenaSystems || App.state.arenaSystems.length === 0) {
+      const topCandidates = App.Optimizer ? App.Optimizer.getLeaderboard('all') : [];
+      if (topCandidates && topCandidates.length > 0) {
+        topCandidates.slice(0, 10).forEach(item => {
+          App.Arena.registerSystem(item.params, item.veto, item.mlVeto);
+        });
+        App.UI.showToast('📥 Auto-Import: Top 10 Strategien aus Auto-ML in Arena registriert!');
+      } else {
+        const b = App.state.bot;
+        [5, 10, 15, 20].forEach(lev => {
+          App.Arena.registerSystem({
+            leverage: lev,
+            cooldownMin: b.cooldownMin || 10,
+            tpPercent: b.tpPercent || 30,
+            slPercent: b.slPercent || 15,
+            maxOpen: b.maxOpen || 6,
+            rules: App.state.rules
+          }, b.veto, b.mlVeto, `Bot-Strategie (${lev}x Hebel)`);
+        });
+        App.UI.showToast('⚡ Auto-Import: Bot-Profil + 4 Hebel-Varianten in Arena registriert!');
+      }
+    }
+
+    const progContainer = document.getElementById('arena-tab-progress-container');
+    const progBar = document.getElementById('arena-tab-progress-bar');
+    const progPercent = document.getElementById('arena-live-percent');
+    const systemNameEl = document.getElementById('arena-live-system-name');
+    const holdoutLabelEl = document.getElementById('arena-live-holdout-label');
+    const counterEl = document.getElementById('arena-live-step-counter');
+    const elapsedEl = document.getElementById('arena-live-elapsed');
+    const etaEl = document.getElementById('arena-live-eta');
+    const startBtn = document.getElementById('btn-arena-tab-run-eval');
+    
+    // Stepper cards
+    const step1Card = document.getElementById('arena-step-1');
+    const step2Card = document.getElementById('arena-step-2');
+    const step3Card = document.getElementById('arena-step-3');
+
+    if (progContainer) progContainer.style.display = 'block';
+    if (startBtn) startBtn.disabled = true;
+
+    // Step 1: Loading datasets
+    if (step1Card) { step1Card.style.borderColor = 'var(--teal)'; step1Card.style.background = 'rgba(0,224,184,0.1)'; }
+    App.UI.showToast('Lade Kerzendaten der ausgewählten Datensätze...');
+
+    const loadedDatasets = [];
+    for (const entry of selectedEntries) {
+      try {
+        let candles = entry.virtualCandles;
+        if (!candles || candles.length === 0) {
+          const raw = await App.DB.get(entry.key);
+          candles = this.unwrapCandles(raw);
+        }
+        if (candles && candles.length > 0) {
+          loadedDatasets.push({
+            key: entry.key,
+            label: entry.label || `${entry.symbol}_${App.Backtest.formatDateShort(entry.fromTime)}-${App.Backtest.formatDateShort(entry.toTime)}`,
+            candles: candles
+          });
+        }
+      } catch (err) {
+        console.error('Konnte Datensatz nicht laden:', entry.key, err);
+      }
+    }
+
+    if (loadedDatasets.length < 2) {
+      App.UI.showToast('Konnte nicht genügend Kerzendaten aus dem Speicher laden. Lade zuerst Kerzen in Tab 1.');
+      if (progContainer) progContainer.style.display = 'none';
+      if (startBtn) startBtn.disabled = false;
+      return;
+    }
+
+    if (step1Card) { step1Card.style.borderColor = 'var(--border-soft)'; step1Card.style.background = 'rgba(255,255,255,0.03)'; }
+    if (step2Card) { step2Card.style.borderColor = 'var(--teal)'; step2Card.style.background = 'rgba(0,224,184,0.1)'; }
+    if (step3Card) { step3Card.style.borderColor = '#ffb020'; step3Card.style.background = 'rgba(255,176,32,0.1)'; }
+
+    const startTime = Date.now();
+
+    await App.Arena.backfillAllSystems(loadedDatasets, (info) => {
+      const now = Date.now();
+      const elapsedSec = Math.round((now - startTime) / 1000);
+      const pct = info.percent || 0;
+      
+      let etaSec = 0;
+      if (pct > 0) {
+        const totalEstimatedSec = (elapsedSec / pct) * 100;
+        etaSec = Math.max(0, Math.round(totalEstimatedSec - elapsedSec));
+      }
+
+      if (progBar) progBar.style.width = pct + '%';
+      if (progPercent) progPercent.textContent = pct + '%';
+      if (systemNameEl) systemNameEl.textContent = info.systemLabel || '-';
+      if (holdoutLabelEl) holdoutLabelEl.textContent = info.holdoutLabel || 'Holdout-Jahr';
+      if (counterEl) counterEl.textContent = `Rotation ${info.step} von ${info.total}`;
+      if (elapsedEl) elapsedEl.textContent = `${elapsedSec}s`;
+      if (etaEl) etaEl.textContent = pct > 5 ? `${etaSec}s verbleibend` : 'berechne...';
+    });
+
+    if (step2Card) { step2Card.style.borderColor = 'var(--border-soft)'; step2Card.style.background = 'rgba(255,255,255,0.03)'; }
+    if (step3Card) { step3Card.style.borderColor = 'var(--border-soft)'; step3Card.style.background = 'rgba(255,255,255,0.03)'; }
+
+    if (progContainer) progContainer.style.display = 'none';
+    if (startBtn) startBtn.disabled = false;
+
+    App.UI.renderArenaTab();
+    App.UI.showToast('🏆 Arena-LOO-Training erfolgreich abgeschlossen!');
+  },
+
+  async renderArenaTab() {
+    const table = document.getElementById('table-arena-tab-leaderboard');
+    if (!table) return;
+
+    await this.renderArenaDatasetSelection();
+
+    const selectedKeys = App.state.arenaDatasets || [];
+    const totalAvailable = selectedKeys.length;
+    const leaderboard = App.Arena.getLeaderboard(totalAvailable);
+
+    // Update Overview Cards
+    const cardSystems = document.getElementById('arena-card-systems-count');
+    if (cardSystems) cardSystems.innerText = (App.state.arenaSystems || []).length;
+
+    const cardDatasets = document.getElementById('arena-card-datasets-count');
+    if (cardDatasets) cardDatasets.innerText = totalAvailable;
+
+    const cardTopScore = document.getElementById('arena-card-top-score');
+    const cardTopName = document.getElementById('arena-card-top-name');
+    if (leaderboard.length > 0) {
+      const top = leaderboard[0];
+      if (cardTopScore) cardTopScore.innerText = top.finalArenaScore;
+      if (cardTopName) cardTopName.innerText = top.system.label || top.systemId;
+    } else {
+      if (cardTopScore) cardTopScore.innerText = '–';
+      if (cardTopName) cardTopName.innerText = 'Kein System';
+    }
+
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+
+    if (leaderboard.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; color:var(--text-faint); font-size: 11px; padding: 20px 0;">Noch keine Arena-Systeme registriert. Klicke oben auf "⚡ Profil als Arena-System registrieren", um zu starten.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = leaderboard.map((item, idx) => {
+      const sys = item.system || {};
+      const params = sys.params || {};
+      const scoreColor = item.finalArenaScore >= 75 ? 'var(--long)' : item.finalArenaScore >= 50 ? '#ffb020' : 'var(--short)';
+      
+      const statusBadge = item.isComplete 
+        ? `<span style="color:var(--long); font-size:9px; border:1px solid var(--long); border-radius:3px; padding:1px 4px; font-weight:bold;">Vollständig (${item.completedRotations}/${item.totalRotations})</span>`
+        : `<span style="color:#ffb020; font-size:9px; border:1px solid #ffb020; border-radius:3px; padding:1px 4px;">Teilweise (${item.completedRotations}/${item.totalRotations})</span>`;
+
+      const rulesLabel = sys.label || App.Optimizer.getRuleLabel(params.rules);
+      const rowId = `arena-tab-row-${idx}`;
+      const detailRowId = `arena-tab-detail-row-${idx}`;
+
+      return `
+        <tr id="${rowId}" style="cursor: pointer;">
+          <td style="font-weight: bold; color: ${scoreColor}; font-size: 13px;">${item.finalArenaScore}</td>
+          <td>${statusBadge}</td>
+          <td style="font-weight: 500;" title="${rulesLabel}">${rulesLabel}</td>
+          <td class="num font-mono">${params.leverage || '–'}x</td>
+          <td class="num font-mono">${params.tpPercent || '–'}%</td>
+          <td class="num font-mono">${params.slPercent || '–'}%</td>
+          <td class="num font-mono" style="color: ${item.minScore >= 50 ? 'var(--long)' : 'var(--short)'}">${item.minScore}</td>
+          <td class="num font-mono">${item.percentile25Score}</td>
+          <td class="num font-mono">${item.avgScore}</td>
+          <td class="num font-mono" style="color: var(--text-dim);">±${item.scoreStdDev}</td>
+          <td class="num font-mono" style="color: var(--short);">${item.maxDD}%</td>
+          <td style="text-align: center;">
+            <div style="display: flex; gap: 4px; justify-content: center;">
+              <button class="btn-small btn-arena-load" data-sys-id="${sys.systemId}" style="padding: 1px 4px; font-size: 9px;" title="Parameter im Bot übernehmen">Laden</button>
+              <button class="btn-small btn-arena-toggle-details" data-detail-id="${detailRowId}" style="padding: 1px 4px; font-size: 9px;">Details</button>
+              <button class="btn-small btn-arena-delete" data-sys-id="${sys.systemId}" style="padding: 1px 4px; font-size: 9px; color: var(--short);" title="System löschen">✕</button>
+            </div>
+          </td>
+        </tr>
+        <tr id="${detailRowId}" style="display: none; background: rgba(0,0,0,0.2);">
+          <td colspan="12" style="padding: 10px 14px;">
+            <div style="font-size: 10px; font-weight: bold; margin-bottom: 6px; color: var(--accent);">Rotations-Ergebnisse (Leave-One-Out Hold-out Jahre):</div>
+            <div style="overflow-x: auto;">
+              <table style="width: 100%; font-size: 9px; border-collapse: collapse;">
+                <thead>
+                  <tr style="color: var(--text-dim); border-bottom: 1px solid var(--border);">
+                    <th style="text-align: left; padding: 3px;">Hold-out Datensatz</th>
+                    <th style="text-align: right; padding: 3px;">Train-Score (OOS)</th>
+                    <th style="text-align: right; padding: 3px;">Holdout-Score</th>
+                    <th style="text-align: right; padding: 3px;">Rendite</th>
+                    <th style="text-align: right; padding: 3px;">Winrate</th>
+                    <th style="text-align: right; padding: 3px;">Max DD</th>
+                    <th style="text-align: right; padding: 3px;">Trades</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${(item.rotations || []).map(r => {
+                    const res = r.results || {};
+                    const ret = (res.totalReturnPercent !== undefined && res.totalReturnPercent !== null) ? res.totalReturnPercent : 0;
+                    const wr = (res.winRatePercent !== undefined && res.winRatePercent !== null) ? res.winRatePercent : 0;
+                    const dd = (res.maxDrawdownPercent !== undefined && res.maxDrawdownPercent !== null) ? res.maxDrawdownPercent : 0;
+                    const trades = res.totalTrades || 0;
+                    const trainSc = (r.trainScore !== undefined && r.trainScore !== null) ? r.trainScore : '–';
+                    const holdSc = (r.holdoutScore !== undefined && r.holdoutScore !== null) ? r.holdoutScore : 0;
+
+                    return `
+                      <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <td style="padding: 3px; font-weight: 500; color: var(--text);">${r.holdoutLabel}</td>
+                        <td style="padding: 3px; text-align: right; color: var(--text-dim);">${trainSc}</td>
+                        <td style="padding: 3px; text-align: right; font-weight: bold; color: ${holdSc >= 50 ? 'var(--long)' : 'var(--short)'}">${holdSc}</td>
+                        <td style="padding: 3px; text-align: right; color: ${ret >= 0 ? 'var(--long)' : 'var(--short)'}">${ret.toFixed(1)}%</td>
+                        <td style="padding: 3px; text-align: right;">${wr.toFixed(1)}%</td>
+                        <td style="padding: 3px; text-align: right; color: var(--short);">${dd.toFixed(1)}%</td>
+                        <td style="padding: 3px; text-align: right;">${trades}</td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('.btn-arena-load').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const sysId = btn.dataset.sysId;
+        const sys = (App.state.arenaSystems || []).find(s => s.systemId === sysId);
+        if (sys) {
+          App.state.bot.leverage = sys.params.leverage;
+          App.state.bot.cooldownMin = sys.params.cooldownMin;
+          App.state.bot.tpPercent = sys.params.tpPercent;
+          App.state.bot.slPercent = sys.params.slPercent;
+          if (sys.params.maxOpen) App.state.bot.maxOpen = sys.params.maxOpen;
+          if (sys.params.rules) App.state.rules = JSON.parse(JSON.stringify(sys.params.rules));
+          if (sys.veto) App.state.bot.veto = JSON.parse(JSON.stringify(sys.veto));
+          if (sys.mlVeto) App.state.bot.mlVeto = JSON.parse(JSON.stringify(sys.mlVeto));
+          
+          App.UI.syncUIFromState();
+          App.saveToLocalStorage();
+          App.UI.showToast(`Arena-System "${sys.label}" erfolgreich in den Auto-Trader geladen!`);
+        }
+      });
+    });
+
+    tbody.querySelectorAll('.btn-arena-toggle-details').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const detailId = btn.dataset.detailId;
+        const row = document.getElementById(detailId);
+        if (row) {
+          row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+        }
+      });
+    });
+
+    tbody.querySelectorAll('.btn-arena-delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const sysId = btn.dataset.sysId;
+        if (confirm('Dieses Arena-System und all seine Rotationsergebnisse wirklich löschen?')) {
+          App.state.arenaSystems = (App.state.arenaSystems || []).filter(s => s.systemId !== sysId);
+          App.state.arenaResults = (App.state.arenaResults || []).filter(r => r.systemId !== sysId);
+          App.Arena.saveToLocalStorage();
+          this.renderArenaTab();
+          App.UI.showToast('Arena-System gelöscht.');
+        }
       });
     });
   },
@@ -1576,7 +2227,7 @@ App.UI = {
       const { trainTrades, testTrades, splitAvailable } = App.TradeAnalyzer.splitTradesForValidation(res.tradeLog);
 
       const mlModel = await App.TradeAnalyzer.trainLossModel(candles, trainTrades);
-      const threshold = 0.6;
+      const threshold = 0.50;
 
       const weighted = mlModel.featureNames.map((name, i) => ({
         name,
@@ -2165,5 +2816,71 @@ App.UI = {
         App.UI.showToast(`Übernommen: Hebel=${lev}x, Cooldown=${cooldown}m, TP=${tp}%, SL=${sl}%, Max. Trades=${maxOpen}${ruleLabel}`);
       });
     });
+  },
+
+  loadTopRankingIntoBot(source) {
+    let system = null;
+    let title = '';
+
+    if (source === 'optimizer') {
+      const leaderboard = App.Optimizer ? App.Optimizer.getLeaderboard('all') : [];
+      if (!leaderboard || leaderboard.length === 0) {
+        this.showToast('Keine Optimizer-Kandidaten vorhanden. Führe zuerst den Auto-ML Optimizer aus!', 'error');
+        return;
+      }
+      system = leaderboard[0];
+      title = 'Bestes Auto-ML Profil';
+    } else if (source === 'arena') {
+      const arenaSystems = (App.state && App.state.arenaSystems) ? App.state.arenaSystems : [];
+      if (!arenaSystems || arenaSystems.length === 0) {
+        this.showToast('Keine Arena-Systeme registriert. Registriere zuerst ein System im Arena-Tab!', 'error');
+        return;
+      }
+      const sorted = [...arenaSystems].sort((a, b) => (b.arenaScore || 0) - (a.arenaScore || 0));
+      system = sorted[0];
+      title = 'Bestes Arena-System';
+    }
+
+    if (!system) {
+      this.showToast('Kein passendes Profil gefunden!', 'error');
+      return;
+    }
+
+    const lev = system.leverage || 10;
+    const cooldown = system.cooldown !== undefined ? system.cooldown : 10;
+    const tp = system.tp !== undefined ? system.tp : 50;
+    const sl = system.sl !== undefined ? system.sl : 25;
+    const maxOpen = system.maxOpenTrades !== undefined ? system.maxOpenTrades : 6;
+    const rules = system.rules || { long: [], short: [] };
+
+    const levInput = document.getElementById('backtest-lev');
+    if (levInput) levInput.value = lev;
+
+    const cdInput = document.getElementById('backtest-cooldown');
+    if (cdInput) cdInput.value = cooldown;
+
+    const tpInput = document.getElementById('backtest-tp');
+    if (tpInput) tpInput.value = tp;
+
+    const slInput = document.getElementById('backtest-sl');
+    if (slInput) slInput.value = sl;
+
+    const maxInput = document.getElementById('backtest-max-open');
+    if (maxInput) maxInput.value = maxOpen;
+
+    App.state.rules = JSON.parse(JSON.stringify(rules));
+    this.renderBacktestRulesList();
+
+    if (system.vetoFilter) {
+      if (!App.state.bot) App.state.bot = {};
+      App.state.bot.veto = JSON.parse(JSON.stringify(system.vetoFilter));
+    }
+
+    if (system.mlVetoModel) {
+      if (!App.state.bot) App.state.bot = {};
+      App.state.bot.mlVeto = JSON.parse(JSON.stringify(system.mlVetoModel));
+    }
+
+    this.showToast(`⚡ ${title} in Test-Bot geladen! Hebel ${lev}x | TP ${tp}% | SL ${sl}%`, 'success');
   }
 };
